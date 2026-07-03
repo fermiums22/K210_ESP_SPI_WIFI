@@ -19,6 +19,34 @@ D:\w_space\esp8266_sdk\ESP8266_RTOS_SDK
 
 The SDK must be Espressif `ESP8266_RTOS_SDK` tag `v3.4`.
 
+## Required MSYS2 packages
+
+The build helper runs `tools/esp8266_rtos_msys_setup.sh` before building. It installs the full known package set in one step instead of discovering missing packages one by one:
+
+```bash
+pacman -S --needed --noconfirm \
+  bash git make diffutils patch tar gzip unzip wget curl \
+  python python-setuptools python-pip python-wheel python-packaging \
+  python-pyserial python-click python-cryptography python-pyparsing \
+  python-pyelftools python-future \
+  cmake ninja flex bison gperf gettext-devel ncurses-devel libexpat
+```
+
+The setup script also smoke-tests these Python imports:
+
+```python
+import pyexpat
+import pkg_resources
+import serial
+import click
+import cryptography
+import pyparsing
+import elftools
+import future
+```
+
+This avoids relying on `./install.sh`, which rejects current MSYS64 as an unsupported platform, and avoids iterative package guessing.
+
 ## Build-only test from Windows cmd
 
 From normal Windows `cmd.exe`:
@@ -28,6 +56,13 @@ cd /d D:\w_space\K210_ESP_SPI_WIFI && git fetch origin && git checkout spi-uart-
 ```
 
 This build-only test does not use K210 COM12.
+
+Expected successful result:
+
+```text
+OK: hello_uart build finished.
+Build directory: /d/w_space/K210_ESP_SPI_WIFI/esp8266_rtos_clean/hello_uart/build
+```
 
 ## Direct ESP flash test
 
@@ -54,9 +89,3 @@ I (...) esp8285_hello: alive seq=1 tick=...
 ## Notes about the SDK clone log
 
 The old nested CoAP/tinydtls submodule URL may fail because it redirects from the old Eclipse Git host. The hello_uart project does not use CoAP, so the build helper intentionally does not block on repairing that nested submodule.
-
-If MSYS has no `python` command, the helper first tries to use `python3` through a local shim. If neither `python` nor `python3` exists, install Python in MSYS once:
-
-```bash
-pacman -S --needed python
-```
