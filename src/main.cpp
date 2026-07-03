@@ -22,8 +22,10 @@ struct __attribute__((packed)) Frame {
 
 static WiFiServer server(TCP_PORT);
 static Frame queueBuf[QUEUE_SIZE];
+static Frame spiTxFrame;
 static volatile uint8_t qHead;
 static volatile uint8_t qTail;
+static bool spiReady;
 static uint8_t seqNo;
 static uint32_t rxBytes;
 static uint32_t lastBytes;
@@ -63,10 +65,28 @@ static bool dequeue(Frame &f)
 
 static void spiLoadNext()
 {
-    Frame f;
-    if (!dequeue(f))
-        makeIdle(f);
-    SPISlave.setData((uint8_t *)&f, sizeof(f));
+    if (!dequeue(spiTxFrame))
+        makeIdle(spiTxFrame);
+    SPISlave.setData((uint8_t *)&spiTxFrame, sizeof(spiTxFrame));
+}
+
+static void spiStartOnce()
+{
+    if (spiReady)
+        return;
+
+    SPISlave.onData([](uint8_t *data, size_t len) {
+        (void)data;
+        (void)len;
+        spiLoadNext();
+    });
+    SPISlave.onDataSent([]() {
+        spiLoadNext();
+    });
+    SPISlave.begin();
+    spiLoadNext();
+    spiReady = true;
+    Serial.println("kesp: spi slave ready");
 }
 
 static void enqueueBegin(const char *name, uint32_t size)
@@ -175,13 +195,18 @@ void setup()
     server.begin();
     server.setNoDelay(true);
 
-    // SPI starts after Wi-Fi bring-up is proven; keeping it off avoids HSPI IRQ flood during connect.
+    // SPI slave is started only after Wi-Fi is connected. That keeps ESP8266 HSPI
+    // interrupts quiet during Wi-Fi bring-up, but still makes the K210 polling loop
+    // receive valid frames as soon as the bridge is online.
 
     lastMs = millis();
 }
 
 void loop()
 {
+    if (WiFi.status() == WL_CONNECTED)
+        spiStartOnce();
+
     WiFiClient c = server.available();
     if (c)
         handleClient(c);
@@ -191,9 +216,10 @@ void loop()
         uint32_t d = rxBytes - lastBytes;
         lastBytes = rxBytes;
         lastMs = now;
-        Serial.printf("kesp: ip=%s status=%d rx=%lu B/s\n",
+        Serial.printf("kesp: ip=%s status=%d spi=%d rx=%lu B/s\n",
                       WiFi.localIP().toString().c_str(),
                       WiFi.status(),
+                      spiReady ? 1 : 0,
                       (unsigned long)d);
     }
 }
