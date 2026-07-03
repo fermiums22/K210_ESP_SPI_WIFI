@@ -13,6 +13,7 @@ static const uint32_t FRAME_MAGIC = 0x5053454bUL;
 static const uint32_t UART_BAUD = 115200;
 static const size_t DATA_BYTES = 20;
 static const size_t QUEUE_SIZE = 64;
+static const uint32_t AP_FALLBACK_MS = 15000;
 
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 2
@@ -40,12 +41,30 @@ static uint32_t rxBytes;
 static uint32_t lastBytes;
 static uint32_t lastMs;
 static uint32_t bootMs;
+static uint32_t lastWifiLogMs;
 static bool ledState;
+static bool apStarted;
+static wl_status_t lastWifiStatus = WL_IDLE_STATUS;
+static char apSsid[24];
 
 static void logLine(const __FlashStringHelper *msg)
 {
     Serial.print(F("kesp: "));
     Serial.println(msg);
+}
+
+static const char *wifiStatusName(wl_status_t st)
+{
+    switch (st) {
+    case WL_IDLE_STATUS: return "IDLE";
+    case WL_NO_SSID_AVAIL: return "NO_SSID";
+    case WL_SCAN_COMPLETED: return "SCAN_DONE";
+    case WL_CONNECTED: return "CONNECTED";
+    case WL_CONNECT_FAILED: return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST: return "CONNECTION_LOST";
+    case WL_DISCONNECTED: return "DISCONNECTED";
+    default: return "UNKNOWN";
+    }
 }
 
 static void makeIdle(Frame &f)
@@ -167,11 +186,15 @@ static bool readLine(WiFiClient &c, String &line)
 static void handleClient(WiFiClient c)
 {
     String line;
-    if (!readLine(c, line) || !line.startsWith("PUT "))
+    if (!readLine(c, line) || !line.startsWith("PUT ")) {
+        c.print("ERR expected: PUT name size\n");
         return;
+    }
     int sp = line.lastIndexOf(' ');
-    if (sp <= 4)
+    if (sp <= 4) {
+        c.print("ERR bad PUT header\n");
         return;
+    }
 
     String name = line.substring(4, sp);
     uint32_t size = (uint32_t)strtoul(line.c_str() + sp + 1, nullptr, 10);
@@ -200,6 +223,40 @@ static void handleClient(WiFiClient c)
     Serial.printf("kesp: DONE %lu/%lu\n", (unsigned long)got, (unsigned long)size);
 }
 
+static void startFallbackAp()
+{
+    if (apStarted)
+        return;
+
+    snprintf(apSsid, sizeof(apSsid), "KESP-%06X", ESP.getChipId() & 0xFFFFFF);
+    WiFi.mode(WIFI_AP_STA);
+    bool ok = WiFi.softAP(apSsid, "12345678");
+    apStarted = ok;
+    Serial.printf("kesp: ap fallback %s ssid=%s pass=12345678 ip=%s port=%u\n",
+                  ok ? "started" : "failed",
+                  apSsid,
+                  WiFi.softAPIP().toString().c_str(),
+                  TCP_PORT);
+}
+
+static void logWifiStatus(bool force)
+{
+    wl_status_t st = WiFi.status();
+    uint32_t now = millis();
+    if (!force && st == lastWifiStatus && now - lastWifiLogMs < 5000)
+        return;
+
+    lastWifiStatus = st;
+    lastWifiLogMs = now;
+    Serial.printf("kesp: wifi status=%d %s sta_ip=%s rssi=%ld ap=%d ap_ip=%s\n",
+                  (int)st,
+                  wifiStatusName(st),
+                  WiFi.localIP().toString().c_str(),
+                  (long)(st == WL_CONNECTED ? WiFi.RSSI() : 0),
+                  apStarted ? 1 : 0,
+                  WiFi.softAPIP().toString().c_str());
+}
+
 void setup()
 {
     pinMode(LED_BUILTIN, OUTPUT);
@@ -219,16 +276,31 @@ void setup()
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     server.begin();
     server.setNoDelay(true);
-    Serial.println(F("kesp: wifi begin"));
+    Serial.printf("kesp: wifi begin ssid=%s port=%u\n", WIFI_SSID, TCP_PORT);
 
     bootMs = millis();
     lastMs = millis();
+    lastWifiLogMs = 0;
+    logWifiStatus(true);
 }
 
 void loop()
 {
-    if (WiFi.status() == WL_CONNECTED)
+    wl_status_t st = WiFi.status();
+    if (st == WL_CONNECTED) {
+        if (!spiReady) {
+            Serial.printf("kesp: wifi connected ip=%s rssi=%ld port=%u\n",
+                          WiFi.localIP().toString().c_str(),
+                          (long)WiFi.RSSI(),
+                          TCP_PORT);
+        }
         spiStartOnce();
+    } else if (!apStarted && millis() - bootMs >= AP_FALLBACK_MS) {
+        startFallbackAp();
+        spiStartOnce();
+    }
+
+    logWifiStatus(false);
 
     WiFiClient c = server.available();
     if (c)
@@ -241,9 +313,10 @@ void loop()
         lastMs = now;
         ledState = !ledState;
         digitalWrite(LED_BUILTIN, ledState ? LOW : HIGH);
-        Serial.printf("kesp: alive=%lu ip=%s status=%d spi=%d rx=%lu B/s\n",
+        Serial.printf("kesp: alive=%lu sta_ip=%s ap_ip=%s status=%d spi=%d rx=%lu B/s\n",
                       (unsigned long)((now - bootMs) / 1000),
                       WiFi.localIP().toString().c_str(),
+                      apStarted ? WiFi.softAPIP().toString().c_str() : "-",
                       WiFi.status(),
                       spiReady ? 1 : 0,
                       (unsigned long)d);
