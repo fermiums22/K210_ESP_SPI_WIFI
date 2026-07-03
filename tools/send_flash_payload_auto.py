@@ -93,8 +93,9 @@ class KsdAutoClient:
             logging.info("K210: %s", line)
         return line
 
-    def stage_line(self, prefixes: tuple[str, ...], stage: str) -> str:
-        logging.info("stage: %s", stage)
+    def stage_line(self, prefixes: tuple[str, ...], stage: str | None = None) -> str:
+        if stage:
+            logging.info("stage: %s", stage)
         while True:
             line = self.read_line_once()
             if not line or not line.startswith("KSD:"):
@@ -176,7 +177,7 @@ class KsdAutoClient:
                     break
                 self.write_payload_block(chunk)
                 sent += len(chunk)
-                line = self.stage_line(("KSD:B", "KSD:ERR"), f"PUT {remote_name} block ACK")
+                line = self.stage_line(("KSD:B", "KSD:ERR"))
                 if line.startswith("KSD:ERR"):
                     raise SystemExit(f"K210 PUT failed at {sent}/{size}: {line}")
                 if sent == size or sent % 32768 == 0:
