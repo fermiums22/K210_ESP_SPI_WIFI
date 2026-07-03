@@ -3,3 +3,20 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Local Python helper environment
+.venv/
+__pycache__/
+*.pyc
+
+# Generated helper output
+logs/
+out/
+
+# Local firmware binaries
+firmware/*.bin
+firmware/**/*.bin
+
+# Windows noise
+Thumbs.db
+Desktop.ini
