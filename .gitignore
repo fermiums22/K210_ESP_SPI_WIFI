@@ -14,6 +14,11 @@ build/
 logs/
 out/
 
+# ESP8266_RTOS_SDK local generated files
+esp8266_rtos_clean/**/sdkconfig
+esp8266_rtos_clean/**/sdkconfig.old
+esp8266_rtos_clean/**/.local-tools/
+
 # Local firmware binaries
 firmware/*.bin
 firmware/**/*.bin
