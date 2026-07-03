@@ -66,7 +66,7 @@ def main() -> int:
     ap.add_argument("host", help="ESP IP, for fallback AP use 192.168.4.1")
     ap.add_argument("file", help="Local file to send")
     ap.add_argument("remote_name", nargs="?", help="Name on K210 SD, max 20 chars recommended")
-    ap.add_argument("--port", type=int, default=7777)
+    ap.add_argument("--port", type=int, default=18080)
     ap.add_argument("--timeout", type=float, default=30.0)
     args = ap.parse_args()
 
