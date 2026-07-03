@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # One-shot MSYS2 dependency setup for official ESP8266_RTOS_SDK v3.4.
-# Keep this list explicit and boring so the Windows bring-up is reproducible.
+# Only install package names that exist in the MSYS repo used by C:\msys64\usr\bin\bash.exe.
+# The ESP8266 xtensa toolchain is handled separately by the Windows BAT file.
 
 MSYS_PACKAGES=(
     bash
@@ -18,14 +19,7 @@ MSYS_PACKAGES=(
     python
     python-setuptools
     python-pip
-    python-wheel
     python-packaging
-    python-pyserial
-    python-click
-    python-cryptography
-    python-pyparsing
-    python-pyelftools
-    python-future
     cmake
     ninja
     flex
@@ -41,21 +35,15 @@ if ! command -v pacman >/dev/null 2>&1; then
     exit 2
 fi
 
-echo "Installing required MSYS2 packages for ESP8266_RTOS_SDK v3.4..."
+echo "Installing required MSYS2 packages for ESP8266_RTOS_SDK v3.4 build..."
 pacman -S --needed --noconfirm "${MSYS_PACKAGES[@]}"
 hash -r
 
-echo "Checking Python core modules..."
+echo "Checking Python build-time core modules..."
 python - <<'PY'
 import pyexpat
 import pkg_resources
-import serial
-import click
-import cryptography
-import pyparsing
-import elftools
-import future
-print('Python dependency smoke test OK')
+print('Python build dependency smoke test OK')
 PY
 
 echo "MSYS2 package setup OK."
