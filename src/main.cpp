@@ -2,12 +2,21 @@
 #include <ESP8266WiFi.h>
 #include <SPISlave.h>
 
+#ifndef KESP_VERSION
+#define KESP_VERSION "dev"
+#endif
+
 static const char *WIFI_SSID = "Fermiums";
 static const char *WIFI_PASS = "876543212";
 static const uint16_t TCP_PORT = 7777;
 static const uint32_t FRAME_MAGIC = 0x5053454bUL;
+static const uint32_t UART_BAUD = 115200;
 static const size_t DATA_BYTES = 20;
 static const size_t QUEUE_SIZE = 64;
+
+#ifndef LED_BUILTIN
+#define LED_BUILTIN 2
+#endif
 
 enum { FT_IDLE = 0, FT_BEGIN = 1, FT_DATA = 2, FT_END = 3 };
 
@@ -30,6 +39,14 @@ static uint8_t seqNo;
 static uint32_t rxBytes;
 static uint32_t lastBytes;
 static uint32_t lastMs;
+static uint32_t bootMs;
+static bool ledState;
+
+static void logLine(const __FlashStringHelper *msg)
+{
+    Serial.print(F("kesp: "));
+    Serial.println(msg);
+}
 
 static void makeIdle(Frame &f)
 {
@@ -86,7 +103,7 @@ static void spiStartOnce()
     SPISlave.begin();
     spiLoadNext();
     spiReady = true;
-    Serial.println("kesp: spi slave ready");
+    Serial.println(F("kesp: spi slave ready"));
 }
 
 static void enqueueBegin(const char *name, uint32_t size)
@@ -142,6 +159,7 @@ static bool readLine(WiFiClient &c, String &line)
                 return false;
         }
         delay(1);
+        yield();
     }
     return false;
 }
@@ -184,21 +202,26 @@ static void handleClient(WiFiClient c)
 
 void setup()
 {
-    Serial.begin(115200);
-    delay(100);
-    Serial.println();
-    Serial.println("kesp: boot arduino");
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, HIGH);
 
+    Serial.begin(UART_BAUD);
+    Serial.setDebugOutput(false);
+    delay(200);
+    Serial.println();
+    Serial.println(F("kesp: boot"));
+    Serial.printf("kesp: version=%s baud=%lu\n", KESP_VERSION, (unsigned long)UART_BAUD);
+
+    WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
     WiFi.hostname("kesp");
+    WiFi.setAutoReconnect(true);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     server.begin();
     server.setNoDelay(true);
+    Serial.println(F("kesp: wifi begin"));
 
-    // SPI slave is started only after Wi-Fi is connected. That keeps ESP8266 HSPI
-    // interrupts quiet during Wi-Fi bring-up, but still makes the K210 polling loop
-    // receive valid frames as soon as the bridge is online.
-
+    bootMs = millis();
     lastMs = millis();
 }
 
@@ -216,10 +239,14 @@ void loop()
         uint32_t d = rxBytes - lastBytes;
         lastBytes = rxBytes;
         lastMs = now;
-        Serial.printf("kesp: ip=%s status=%d spi=%d rx=%lu B/s\n",
+        ledState = !ledState;
+        digitalWrite(LED_BUILTIN, ledState ? LOW : HIGH);
+        Serial.printf("kesp: alive=%lu ip=%s status=%d spi=%d rx=%lu B/s\n",
+                      (unsigned long)((now - bootMs) / 1000),
                       WiFi.localIP().toString().c_str(),
                       WiFi.status(),
                       spiReady ? 1 : 0,
                       (unsigned long)d);
     }
+    yield();
 }
