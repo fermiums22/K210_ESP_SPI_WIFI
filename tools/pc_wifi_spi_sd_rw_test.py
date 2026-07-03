@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import socket
-import sys
 import time
 from pathlib import Path
 
@@ -76,7 +75,6 @@ class KsdClient:
             import serial  # type: ignore
         except ImportError as exc:
             raise SystemExit("pyserial is not installed. Run: py -3 -m pip install -r requirements.txt") from exc
-        self.serial_mod = serial
         self.ser = serial.Serial(port, baud, timeout=0.05)
         self.port = port
         self.baud = baud
@@ -133,6 +131,13 @@ class KsdClient:
     def command_prompt(self) -> None:
         self.wait_ksd(("KSD:CMD",), "KSD command prompt")
 
+    def run_spi(self) -> None:
+        self.command_prompt()
+        print("KSD RUN_SPI")
+        self.ser.write(b"RUN_SPI\n")
+        self.ser.flush()
+        self.wait_ksd(("KSD:RUNSPI", "KSD:ERR"), "RUN_SPI")
+
     def get_file(self, remote: str, dst: Path) -> float:
         self.command_prompt()
         print(f"KSD GET: {remote}")
@@ -171,6 +176,27 @@ class KsdClient:
         self.wait_ksd(("KSD:DONE",), "DONE")
 
 
+def ksd_run_spi_once(port: str, baud: int, timeout: float) -> None:
+    ksd = KsdClient(port, baud, timeout)
+    try:
+        ksd.connect()
+        ksd.run_spi()
+        ksd.done()
+    finally:
+        ksd.close()
+
+
+def ksd_get_verify(port: str, baud: int, timeout: float, remote: str, dst: Path) -> float:
+    ksd = KsdClient(port, baud, timeout)
+    try:
+        ksd.connect()
+        elapsed = ksd.get_file(remote, dst)
+        ksd.done()
+        return elapsed
+    finally:
+        ksd.close()
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     ap = argparse.ArgumentParser(description="PC -> WiFi -> ESP SPI -> K210 SD write, then KSD SD readback verify")
@@ -197,18 +223,16 @@ def main() -> int:
     src_hash = sha256_file(local)
     print(f"Local SHA256: {src_hash}")
 
+    print("Start K210 ESP UART/SPI receiver through KSD RUN_SPI...")
+    ksd_run_spi_once(args.sd_uart, args.sd_baud, args.timeout)
+    time.sleep(1.0)
+
     tcp_s = tcp_put(args.host, args.tcp_port, local, args.remote, args.timeout)
 
     print("Wait 2 seconds for K210 SD close/log flush...")
     time.sleep(2.0)
 
-    ksd = KsdClient(args.sd_uart, args.sd_baud, args.timeout)
-    try:
-        ksd.connect()
-        get_s = ksd.get_file(args.remote, readback)
-        ksd.done()
-    finally:
-        ksd.close()
+    get_s = ksd_get_verify(args.sd_uart, args.sd_baud, args.timeout, args.remote, readback)
 
     rb_hash = sha256_file(readback)
     print(f"Readback SHA256: {rb_hash}")
