@@ -107,6 +107,8 @@ def collect_parts(args: argparse.Namespace) -> list[FlashPart]:
     merged = build_dir / "firmware_1m_merged.bin"
 
     if boot.exists() and irom.exists():
+        # Old ESP8266 cores may generate split images. In that case send the same
+        # offsets as esptool would normally use for 1 MB ESP8285 flash.
         parts = [
             FlashPart(boot, "esp_boot.bin", 0x00000000),
             FlashPart(irom, "esp_irom.bin", 0x00020000),
@@ -119,13 +121,22 @@ def collect_parts(args: argparse.Namespace) -> list[FlashPart]:
                 parts.append(FlashPart(candidate, remote, offset))
         return parts
 
-    if merged.exists():
-        return [FlashPart(merged, "esp8285_at.bin", 0x00000000)]
+    if args.full_flash:
+        if not merged.exists():
+            raise SystemExit(f"--full-flash requested, but merged image not found: {merged}")
+        logging.warning("Using FULL 1 MB merged image. This erases/writes the whole ESP8285 flash.")
+        return [FlashPart(merged, "esp8285_full_1m.bin", 0x00000000)]
 
     if boot.exists():
-        logging.warning("Only firmware.bin was found. Sending it as a single image at 0x00000000.")
-        logging.warning("If ESP boots incorrectly, check that firmware.bin.irom0text.bin was generated.")
+        # Current PlatformIO/Arduino ESP8266 build produces a bootable combined
+        # firmware.bin. For bring-up this is safer than writing a 1 MB FF-padded
+        # image, because we do not wipe RF/system sectors unnecessarily.
+        logging.info("Using PlatformIO firmware.bin at 0x00000000 (default safe mode).")
         return [FlashPart(boot, "esp8285_at.bin", 0x00000000)]
+
+    if merged.exists():
+        logging.warning("Only merged 1 MB image was found; using it because firmware.bin is missing.")
+        return [FlashPart(merged, "esp8285_full_1m.bin", 0x00000000)]
 
     raise SystemExit(
         "No firmware image found. Run PlatformIO build first or pass --firmware path\\to\\image.bin.\n"
@@ -134,7 +145,10 @@ def collect_parts(args: argparse.Namespace) -> list[FlashPart]:
 
 
 def write_payload(parts: Iterable[FlashPart]) -> list[Path]:
+    if OUT_DIR.exists():
+        shutil.rmtree(OUT_DIR)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+
     copied: list[Path] = []
     json_parts = []
 
@@ -240,6 +254,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--firmware", help="Send one explicit .bin instead of PlatformIO split outputs")
     ap.add_argument("--remote-name", help="Remote file name for --firmware, default esp8285_at.bin")
     ap.add_argument("--offset", default="0x0", help="Flash offset for --firmware, default 0x0")
+    ap.add_argument("--full-flash", action="store_true", help="Use generated 1 MB merged image instead of default firmware.bin")
     ap.add_argument("--dry-run", action="store_true", help="Build/prepare only, do not send over TCP")
     ap.add_argument("--timeout", type=float, default=30.0, help="TCP timeout seconds")
     ap.add_argument("--monitor", help="After upload, wait for Enter and monitor K210 serial COM port, e.g. COM7")
