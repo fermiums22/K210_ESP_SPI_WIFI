@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory=$true, Position=0)] [string]$HostName,
     [Parameter(Mandatory=$true, Position=1)] [string]$LocalFile,
     [Parameter(Mandatory=$false, Position=2)] [string]$RemoteName,
-    [int]$Port = 7777,
+    [int]$Port = 18080,
     [int]$TimeoutMs = 30000
 )
 
