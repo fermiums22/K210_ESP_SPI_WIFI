@@ -21,31 +21,29 @@ The SDK must be Espressif `ESP8266_RTOS_SDK` tag `v3.4`.
 
 ## Required MSYS2 packages
 
-The build helper runs `tools/esp8266_rtos_msys_setup.sh` before building. It installs the full known package set in one step instead of discovering missing packages one by one:
+The build helper runs `tools/esp8266_rtos_msys_setup.sh` before building. It installs only package names that exist in the plain MSYS repo used by `C:\msys64\usr\bin\bash.exe`:
 
 ```bash
 pacman -S --needed --noconfirm \
   bash git make diffutils patch tar gzip unzip wget curl \
-  python python-setuptools python-pip python-wheel python-packaging \
-  python-pyserial python-click python-cryptography python-pyparsing \
-  python-pyelftools python-future \
+  python python-setuptools python-pip python-packaging \
   cmake ninja flex bison gperf gettext-devel ncurses-devel libexpat
 ```
 
-The setup script also smoke-tests these Python imports:
+The setup script smoke-tests only the Python modules needed for the current build stage:
 
 ```python
 import pyexpat
 import pkg_resources
-import serial
-import click
-import cryptography
-import pyparsing
-import elftools
-import future
 ```
 
-This avoids relying on `./install.sh`, which rejects current MSYS64 as an unsupported platform, and avoids iterative package guessing.
+The ESP8266 xtensa toolchain is separate and is downloaded by the Windows `.bat` helper into:
+
+```text
+D:\w_space\esp8266_sdk\xtensa-lx106-elf
+```
+
+Important: the `.bat` helper does **not** prepend the xtensa toolchain to PATH before Python checks, because toolchain DLLs can shadow MSYS Python DLL dependencies and break `pyexpat`.
 
 ## Build-only test from Windows cmd
 
