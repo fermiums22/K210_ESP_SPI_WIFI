@@ -14,7 +14,7 @@ shift
 goto collect_args
 :args_done
 
-echo === Upload existing ESP8285 payload via K210 UART ===
+echo === Automatic ESP8285 payload upload via K210 UART ===
 echo Repo: %CD%
 echo Port: %PORT%
 echo Extra:%EXTRA%
@@ -28,11 +28,9 @@ if %ERRORLEVEL%==0 (
 )
 
 echo Python command: %PY%
-echo STEP 1: PC opens COM and listens for K210 boot SD service.
-echo No SD write and no ESP flash at this stage.
-echo Follow the action line printed by Python.
+echo Flow: open COM, auto reset K210, KSD handshake, SD write, K210 reset, ESP flash log.
 echo.
-%PY% tools\send_flash_payload.py --no-build --sd-uart %PORT% %EXTRA%
+%PY% tools\send_flash_payload_auto.py --no-build --sd-uart %PORT% --auto-reset dan %EXTRA%
 if errorlevel 1 (
   echo.
   echo FAILED. Send console output and logs\flash_payload_*.log here.
