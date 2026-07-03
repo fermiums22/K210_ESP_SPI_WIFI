@@ -13,11 +13,10 @@ echo K210 repo: %K210_DIR%
 echo.
 echo Flow:
 echo   1. Build ESP GPIO pin tester.
-echo   2. Upload/flash ESP while K210 MAIN/KSD is alive.
-echo   3. Flash minimal K210 pin tester: no LCD, no audio, no SD, no KSD.
-echo   4. Monitor pin-test result.
-echo.
-echo Requirement: K210 must currently run MAIN/KSD. If not, flash K210 main first.
+echo   2. Patch/build/flash K210 main with fast ESP flash baud.
+echo   3. Upload/flash ESP through K210 MAIN/KSD at fast baud if accepted.
+echo   4. Flash minimal K210 pin tester: no LCD, no audio, no SD, no KSD.
+echo   5. Monitor pin-test result.
 echo.
 
 if not exist "%K210_DIR%\.git" (
@@ -34,19 +33,29 @@ git pull --ff-only origin spi-uart-test || exit /b 12
 echo === ESP: build GPIO tester ===
 call build_esp_payload.bat || exit /b 20
 
-echo === ESP: upload/flash through current K210 MAIN/KSD, no reset ===
-echo If this fails with KSD timeout, run recovery main flash first; do not use --auto-reset dan here.
-call upload_esp_payload_uart.bat %PORT% || exit /b 21
+cd /d "%K210_DIR%" || exit /b 2
+echo === K210 MAIN: checkout, patch fast ESP baud, build + flash ===
+git fetch origin || exit /b 30
+git checkout main || exit /b 31
+git pull --ff-only origin main || exit /b 32
+py -3 "%ESP_DIR%tools\patch_k210_fast_esp_baud.py" "%K210_DIR%" --baud 921600 || exit /b 33
+call build_k210.bat || exit /b 34
+call flash_k210.bat %PORT% --no-build || exit /b 35
+
+cd /d "%ESP_DIR%" || exit /b 2
+echo === ESP: upload/flash through patched K210 MAIN/KSD, no extra reset ===
+echo Watch for: [esp-flash] baud switched to 921600 and session baud=921600.
+call upload_esp_payload_uart.bat %PORT% || exit /b 40
 
 cd /d "%K210_DIR%" || exit /b 2
 echo === K210: checkout spi-uart-test ===
-git fetch origin || exit /b 30
-git checkout spi-uart-test || exit /b 31
-git pull --ff-only origin spi-uart-test || exit /b 32
+git fetch origin || exit /b 50
+git checkout spi-uart-test || exit /b 51
+git pull --ff-only origin spi-uart-test || exit /b 52
 
 echo === K210: build + flash minimal GPIOHS tester ===
-call build_k210.bat || exit /b 40
-call flash_k210.bat %PORT% --no-build || exit /b 41
+call build_k210.bat || exit /b 60
+call flash_k210.bat %PORT% --no-build || exit /b 61
 
 cd /d "%ESP_DIR%" || exit /b 2
 echo === Monitor safe pin test ===
