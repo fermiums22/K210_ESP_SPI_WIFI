@@ -31,12 +31,21 @@ DEFAULT_TCP_PORT = 7777
 KSD_MAGIC = b"KSD1\n"
 KSD_CHUNK = 512
 
+# Current K210 KSD raw PUT path can stall around the 128 KiB boundary on this
+# board/USB-UART/SD combination. K210 ESP flasher already supports up to 8
+# flash.json parts, so keep every UART-uploaded ESP payload file well below
+# that boundary and flash the same image back as sequential ESP flash parts.
+KSD_SAFE_FLASH_PART_BYTES = 0x10000  # 64 KiB, flash-sector aligned
+K210_MAX_ESP_FLASH_PARTS = 8
+
 
 @dataclass(frozen=True)
 class FlashPart:
     source: Path
     remote_name: str
     offset: int
+    source_offset: int = 0
+    size: int | None = None
 
 
 def setup_logging() -> Path:
@@ -97,12 +106,70 @@ def maybe_path(path: str | None) -> Path | None:
     return p
 
 
+def part_payload_size(part: FlashPart) -> int:
+    if part.size is not None:
+        return part.size
+    return part.source.stat().st_size - part.source_offset
+
+
+def split_large_part(part: FlashPart) -> list[FlashPart]:
+    total = part_payload_size(part)
+    if total <= KSD_SAFE_FLASH_PART_BYTES:
+        return [part]
+
+    chunks: list[FlashPart] = []
+    pos = 0
+    while pos < total:
+        chunk = min(KSD_SAFE_FLASH_PART_BYTES, total - pos)
+        chunks.append(
+            FlashPart(
+                source=part.source,
+                remote_name=f"esp_{part.offset + pos:06x}.bin",
+                offset=part.offset + pos,
+                source_offset=part.source_offset + pos,
+                size=chunk,
+            )
+        )
+        pos += chunk
+
+    if len(chunks) > K210_MAX_ESP_FLASH_PARTS:
+        raise SystemExit(
+            f"Image {part.source} is {total} bytes and would need {len(chunks)} KSD-safe parts. "
+            f"Current K210 ESP flash config supports only {K210_MAX_ESP_FLASH_PARTS} parts. "
+            "Use app-only firmware.bin, or update K210 flasher before using this image."
+        )
+
+    logging.info(
+        "payload split: %s offset=0x%08X size=%d -> %d x <= %d byte parts",
+        part.source,
+        part.offset,
+        total,
+        len(chunks),
+        KSD_SAFE_FLASH_PART_BYTES,
+    )
+    return chunks
+
+
+def split_large_parts(parts: Iterable[FlashPart]) -> list[FlashPart]:
+    out: list[FlashPart] = []
+    for part in parts:
+        out.extend(split_large_part(part))
+    if len(out) > K210_MAX_ESP_FLASH_PARTS:
+        raise SystemExit(
+            f"Payload needs {len(out)} ESP flash parts, but K210 currently supports "
+            f"only {K210_MAX_ESP_FLASH_PARTS}."
+        )
+    return out
+
+
 def collect_parts(args: argparse.Namespace) -> list[FlashPart]:
     explicit_fw = maybe_path(args.firmware)
     if explicit_fw:
         if not explicit_fw.exists():
             raise SystemExit(f"Firmware file not found: {explicit_fw}")
-        return [FlashPart(explicit_fw, args.remote_name or "esp8285_at.bin", int(args.offset, 0))]
+        return split_large_parts([
+            FlashPart(explicit_fw, args.remote_name or "esp8285_at.bin", int(args.offset, 0))
+        ])
 
     build_dir = maybe_path(args.build_dir) or (ROOT / ".pio" / "build" / args.env)
     boot = build_dir / "firmware.bin"
@@ -120,21 +187,21 @@ def collect_parts(args: argparse.Namespace) -> list[FlashPart]:
         ]:
             if candidate.exists():
                 parts.append(FlashPart(candidate, remote, offset))
-        return parts
+        return split_large_parts(parts)
 
     if args.full_flash:
         if not merged.exists():
             raise SystemExit(f"--full-flash requested, but merged image not found: {merged}")
         logging.warning("Using FULL 1 MB merged image. This erases/writes the whole ESP8285 flash.")
-        return [FlashPart(merged, "esp8285_full_1m.bin", 0x00000000)]
+        return split_large_parts([FlashPart(merged, "esp8285_full_1m.bin", 0x00000000)])
 
     if boot.exists():
         logging.info("Using PlatformIO firmware.bin at 0x00000000 (default safe mode).")
-        return [FlashPart(boot, "esp8285_at.bin", 0x00000000)]
+        return split_large_parts([FlashPart(boot, "esp8285_at.bin", 0x00000000)])
 
     if merged.exists():
         logging.warning("Only merged 1 MB image was found; using it because firmware.bin is missing.")
-        return [FlashPart(merged, "esp8285_full_1m.bin", 0x00000000)]
+        return split_large_parts([FlashPart(merged, "esp8285_full_1m.bin", 0x00000000)])
 
     raise SystemExit(
         "No firmware image found. Run PlatformIO build first or pass --firmware path\\to\\image.bin.\n"
@@ -185,6 +252,22 @@ def patch_flash_config(existing_text: str | None, parts: list[FlashPart]) -> dic
     return cfg
 
 
+def copy_part_payload(part: FlashPart, dst: Path) -> None:
+    if part.source_offset == 0 and part.size is None:
+        shutil.copyfile(part.source, dst)
+        return
+
+    remaining = part_payload_size(part)
+    with part.source.open("rb") as src, dst.open("wb") as out:
+        src.seek(part.source_offset)
+        while remaining:
+            data = src.read(min(64 * 1024, remaining))
+            if not data:
+                raise SystemExit(f"Short read while slicing {part.source}")
+            out.write(data)
+            remaining -= len(data)
+
+
 def write_payload(parts: list[FlashPart], flash_config: dict | None = None) -> list[Path]:
     if OUT_DIR.exists():
         shutil.rmtree(OUT_DIR)
@@ -194,11 +277,13 @@ def write_payload(parts: list[FlashPart], flash_config: dict | None = None) -> l
 
     for part in parts:
         dst = OUT_DIR / part.remote_name
-        shutil.copyfile(part.source, dst)
+        copy_part_payload(part, dst)
         copied.append(dst)
         logging.info(
-            "payload: %s -> %s @ 0x%08X (%d bytes)",
+            "payload: %s[%d:+%d] -> %s @ 0x%08X (%d bytes)",
             part.source,
+            part.source_offset,
+            part_payload_size(part),
             part.remote_name,
             part.offset,
             dst.stat().st_size,
