@@ -59,13 +59,12 @@ ensure_toolchain_cmd
 export IDF_PATH="$SDK"
 export IDF_PYTHON_ENV_PATH=""
 
-if [ -f "$SDK/requirements.txt" ]; then
-    if ! python -m pip --version >/dev/null 2>&1; then
-        pacman -S --needed --noconfirm python-pip || true
-    fi
-    if python -m pip --version >/dev/null 2>&1; then
-        python -m pip install --user -r "$SDK/requirements.txt"
-    fi
+# Avoid automatic pip install by default. If make flash reports missing pyserial
+# or esptool dependencies, rerun with ESP8266_RTOS_INSTALL_REQS=1 after fixing MSYS pip.
+if [ "${ESP8266_RTOS_INSTALL_REQS:-0}" = "1" ] && [ -f "$SDK/requirements.txt" ]; then
+    python -m pip install --user -r "$SDK/requirements.txt"
+else
+    echo "Skipping pip requirements install for direct flash bring-up."
 fi
 
 cd "$PROJ"
