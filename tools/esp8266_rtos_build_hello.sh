@@ -69,18 +69,14 @@ xtensa-lx106-elf-gcc --version | head -n 1
 # Keep already downloaded useful submodules, but avoid recursive repair here.
 git submodule update --init components/json/cJSON components/lwip/lwip components/mbedtls/mbedtls components/mqtt/esp-mqtt || true
 
-# ESP8266_RTOS_SDK v3.4 Windows flow uses manually downloaded xtensa toolchain.
-# Do not call ./install.sh here: it rejects current MSYS64 with "unsupported platform".
-if [ -f "$SDK/requirements.txt" ]; then
-    if ! python -m pip --version >/dev/null 2>&1; then
-        echo "python pip not found. Installing MSYS python-pip..."
-        pacman -S --needed --noconfirm python-pip || true
-    fi
-    if python -m pip --version >/dev/null 2>&1; then
-        python -m pip install --user -r "$SDK/requirements.txt"
-    else
-        echo "WARNING: pip still not available; continuing. Build may fail if SDK python packages are missing."
-    fi
+# Keep this first build-only test independent from pip: on some MSYS installs
+# Python 3.12 pip fails while importing pyexpat. The hello build should prove
+# the compiler/SDK path first. If make later reports a missing Python package,
+# that will be handled as the next layer.
+if [ "${ESP8266_RTOS_INSTALL_REQS:-0}" = "1" ] && [ -f "$SDK/requirements.txt" ]; then
+    python -m pip install --user -r "$SDK/requirements.txt"
+else
+    echo "Skipping pip requirements install for build-only bring-up."
 fi
 
 cd "$PROJ"
