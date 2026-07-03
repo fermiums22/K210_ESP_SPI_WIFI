@@ -6,14 +6,14 @@
 #define KESP_VERSION "dev"
 #endif
 
-static const char *WIFI_SSID = "Fermiums";
+static const char *WIFI_SSID = "Fermiums_2.4";
 static const char *WIFI_PASS = "876543212";
 static const uint16_t TCP_PORT = 7777;
 static const uint32_t FRAME_MAGIC = 0x5053454bUL;
 static const uint32_t UART_BAUD = 115200;
 static const size_t DATA_BYTES = 20;
 static const size_t QUEUE_SIZE = 64;
-static const uint32_t AP_FALLBACK_MS = 15000;
+static const uint32_t AP_FALLBACK_MS = 30000;
 
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 2
@@ -248,13 +248,14 @@ static void logWifiStatus(bool force)
 
     lastWifiStatus = st;
     lastWifiLogMs = now;
-    Serial.printf("kesp: wifi status=%d %s sta_ip=%s rssi=%ld ap=%d ap_ip=%s\n",
+    Serial.printf("kesp: wifi status=%d %s sta_ip=%s rssi=%ld ap=%d ap_ip=%s target_ssid=%s\n",
                   (int)st,
                   wifiStatusName(st),
                   WiFi.localIP().toString().c_str(),
                   (long)(st == WL_CONNECTED ? WiFi.RSSI() : 0),
                   apStarted ? 1 : 0,
-                  WiFi.softAPIP().toString().c_str());
+                  WiFi.softAPIP().toString().c_str(),
+                  WIFI_SSID);
 }
 
 void setup()
@@ -276,7 +277,8 @@ void setup()
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     server.begin();
     server.setNoDelay(true);
-    Serial.printf("kesp: wifi begin ssid=%s port=%u\n", WIFI_SSID, TCP_PORT);
+    Serial.printf("kesp: wifi begin ssid=%s port=%u fallback_ms=%lu\n",
+                  WIFI_SSID, TCP_PORT, (unsigned long)AP_FALLBACK_MS);
 
     bootMs = millis();
     lastMs = millis();
