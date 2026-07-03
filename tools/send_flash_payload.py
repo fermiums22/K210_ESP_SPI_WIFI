@@ -230,12 +230,12 @@ def collect_parts(args: argparse.Namespace) -> list[FlashPart]:
         parts = [
             FlashPart(boot, "esp_boot.bin", 0x00000000),
             FlashPart(irom, "esp_irom.bin", 0x00020000),
-            # ESP8266 RTOS SDK 1.5 expects valid RF/system parameter sectors at
-            # the end of 1 MB flash.  Without these the boot log loops at:
-            #   rf_cal[0] !=0x05,is 0x00
-            FlashPart(blank, "esp_rfcal_blank.bin", 0x000FB000),
-            FlashPart(init_data, "esp_init.bin", 0x000FC000),
-            FlashPart(blank, "esp_sys_blank.bin", 0x000FE000),
+            # Keep all generated remote names 8.3-compatible.  The K210 SD path
+            # is currently being debugged; avoiding LFN entries removes one more
+            # source of FAT/root-directory weirdness during repeated tests.
+            FlashPart(blank, "rfcal.bin", 0x000FB000),
+            FlashPart(init_data, "init.bin", 0x000FC000),
+            FlashPart(blank, "sysblk.bin", 0x000FE000),
         ]
         return split_large_parts(parts)
 
