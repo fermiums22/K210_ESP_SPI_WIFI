@@ -23,5 +23,19 @@ if %ERRORLEVEL%==0 (
   set "PY=python"
 )
 
+echo === WiFi TCP PUT ===
+echo Host: %HOST%:7777
+echo File: %FILE%
+echo Remote: %REMOTE%
+echo.
+
 %PY% tools\tcp_put_file.py "%HOST%" "%FILE%" "%REMOTE%"
+set "RC=%ERRORLEVEL%"
+if "%RC%"=="0" exit /b 0
+
+echo.
+echo Python uploader failed with exit code %RC%.
+echo Trying PowerShell/.NET uploader fallback...
+echo.
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\tcp_put_file.ps1 "%HOST%" "%FILE%" "%REMOTE%"
 exit /b %ERRORLEVEL%
