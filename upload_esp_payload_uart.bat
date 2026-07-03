@@ -14,7 +14,7 @@ shift
 goto collect_args
 :args_done
 
-echo === Automatic ESP8285 RTOS SPI payload upload via K210 diagnostic-loader ===
+echo === Automatic ESP8285 WiFi/SPI payload upload via K210 KSD ===
 echo Repo: %CD%
 echo Port: %PORT%
 echo Extra:%EXTRA%
@@ -28,9 +28,9 @@ if %ERRORLEVEL%==0 (
 )
 
 echo Python command: %PY%
-echo Flow: KSD handshake, SD write, FLASH_ESP, RUN_SPI, monitor pure SPI verdict.
+echo Flow: KSD handshake, SD write, FLASH_ESP, monitor ESP WiFi/SPI ready.
 echo.
-%PY% tools\send_flash_payload_rtos_spi.py --no-build --sd-uart %PORT% %EXTRA%
+%PY% tools\send_flash_payload_auto.py --no-build --sd-uart %PORT% %EXTRA%
 if errorlevel 1 (
   echo.
   echo FAILED. Send console output and logs\flash_payload_*.log here.
