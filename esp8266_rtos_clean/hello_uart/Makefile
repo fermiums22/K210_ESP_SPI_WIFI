@@ -15,7 +15,9 @@ COMPONENTS := \
     lwip \
     main \
     newlib \
+    nvs_flash \
     partition_table \
-    spi_flash
+    spi_flash \
+    tcpip_adapter
 
 include $(IDF_PATH)/make/project.mk
