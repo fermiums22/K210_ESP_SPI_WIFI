@@ -39,6 +39,13 @@ class KsdAutoClient:
         self.ser.write(data)
         self.ser.flush()
 
+    def write_command(self, line: str) -> None:
+        data = line.encode("ascii")
+        for b in data:
+            self.ser.write(bytes((b,)))
+            self.ser.flush()
+            time.sleep(0.003)
+
     def set_lines(self, dtr: bool, rts: bool, delay_s: float) -> None:
         self.ser.dtr = dtr
         self.ser.rts = rts
@@ -121,10 +128,7 @@ class KsdAutoClient:
 
     def command_prompt(self) -> None:
         self.stage_line(("KSD:CMD",), "K210 command prompt")
-        # Give K210 a guard time to leave TX logging and enter raw RX polling.
-        # This is not a manual workaround: it makes the line-oriented protocol
-        # tolerant to UART adapter/driver buffering around the shared debug port.
-        time.sleep(0.20)
+        time.sleep(0.05)
 
     def read_exact_loop(self, size: int) -> bytes:
         data = bytearray()
@@ -137,7 +141,7 @@ class KsdAutoClient:
     def get_file(self, name: str) -> str | None:
         self.command_prompt()
         logging.info("sd-uart GET %s", name)
-        self.write(f"GET {name}\n".encode("ascii"))
+        self.write_command(f"GET {name}\n")
         line = self.stage_line(("KSD:SIZE", "KSD:MISSING", "KSD:ERR"), f"GET {name} response")
         if line.startswith("KSD:MISSING"):
             logging.info("sd-uart GET %s: missing", name)
@@ -158,7 +162,7 @@ class KsdAutoClient:
         size = path.stat().st_size
         self.command_prompt()
         logging.info("sd-uart PUT %s (%d bytes)", remote_name, size)
-        self.write(f"PUT {remote_name} {size}\n".encode("ascii"))
+        self.write_command(f"PUT {remote_name} {size}\n")
         line = self.stage_line(("KSD:GO", "KSD:ERR"), f"PUT {remote_name} GO")
         if not line.startswith("KSD:GO"):
             raise SystemExit(f"K210 refused PUT {remote_name}: {line}")
@@ -183,7 +187,7 @@ class KsdAutoClient:
     def reset_and_monitor(self) -> None:
         self.command_prompt()
         logging.info("sd-uart RESET")
-        self.write(b"RESET\n")
+        self.write_command("RESET\n")
         self.stage_line(("KSD:RESETTING", "KSD:ERR"), "RESET ACK")
         logging.info("stage: K210 rebooted; monitoring ESP flash result")
         stop_markers = ("ESP flash result: OK", "ESP flash result: FAIL", "[esp-flash] done", "[esp-flash] connect failed")
