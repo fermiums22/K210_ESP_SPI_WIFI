@@ -5,7 +5,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "esp8266/spi_struct.h"
 #include "driver/spi.h"
 #include "driver/uart.h"
 
@@ -23,8 +22,6 @@ static volatile uint32_t s_rd_done_count;
 static volatile uint32_t s_wr_done_count;
 static volatile uint32_t s_seq;
 static volatile uint32_t s_last_done;
-static volatile uint32_t s_last_rx0;
-static volatile uint32_t s_last_rx1;
 static uint32_t s_tx_words[SPI_FRAME_WORDS];
 
 static void make_pattern(uint32_t seq, uint32_t *out)
@@ -86,8 +83,6 @@ static void IRAM_ATTR spi_event_cb(int event, void *arg)
     if (done & SPI_SLV_WR_BUF_DONE) {
         s_wr_done_count++;
         s_rx_count++;
-        s_last_rx0 = SPI1.data_buf[0];
-        s_last_rx1 = SPI1.data_buf[1];
     }
 
     if (done & SPI_SLV_RD_BUF_DONE) {
@@ -101,17 +96,14 @@ static void spi_slave_init(void)
     spi_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
 
-    /* ESP-AT's ESP8266 HSPI slave path uses the same driver level and documents
-     * this interface value as: CS_EN=1, MISO_EN=1, MOSI_EN=1, byte/bit order=0,
-     * CPHA=0, CPOL=0.  The important difference from Arduino SPISlave here is
-     * that we request a raw MISO phase: no command/address/dummy bytes. */
+    /* Old PlatformIO ESP8266 RTOS SDK exposes the HSPI slave driver through
+     * driver/spi.h but does not expose esp8266/spi_struct.h.  Keep this test on
+     * the public driver API only: no direct SPI1 register access here. */
     cfg.interface.val = HSPI_IF_MODE0_RAW;
     cfg.intr_enable.val = SPI_SLAVE_DEFAULT_INTR_ENABLE;
     cfg.mode = SPI_SLAVE_MODE;
     cfg.event_cb = spi_event_cb;
 
-    SPI1.rd_status.val = 0;
-    SPI1.wr_status = 0;
     spi_init(HSPI_HOST, &cfg);
     spi_load_next_pattern();
 }
@@ -141,14 +133,12 @@ void app_main(void)
         uint32_t rx = s_rx_count;
         uint32_t rd = s_rd_done_count;
         uint32_t wr = s_wr_done_count;
-        printf("kesp-rtos-spi-test: alive rx=%lu/+%lu rd=%lu/+%lu wr=%lu/+%lu next_seq=%lu done=0x%08lx rx0=%08lx rx1=%08lx\n",
+        printf("kesp-rtos-spi-test: alive rx=%lu/+%lu rd=%lu/+%lu wr=%lu/+%lu next_seq=%lu done=0x%08lx\n",
                (unsigned long)rx, (unsigned long)(rx - last_rx),
                (unsigned long)rd, (unsigned long)(rd - last_rd),
                (unsigned long)wr, (unsigned long)(wr - last_wr),
                (unsigned long)s_seq,
-               (unsigned long)s_last_done,
-               (unsigned long)s_last_rx0,
-               (unsigned long)s_last_rx1);
+               (unsigned long)s_last_done);
         last_rx = rx;
         last_rd = rd;
         last_wr = wr;
