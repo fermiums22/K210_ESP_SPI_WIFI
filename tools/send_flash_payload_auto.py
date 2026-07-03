@@ -84,12 +84,12 @@ class KsdAutoClient:
         else:
             raise SystemExit(f"Unknown auto-reset mode: {self.reset_mode}")
 
-    def read_line_once(self) -> str | None:
+    def read_line_once(self, *, quiet_ksd_block_ack: bool = True) -> str | None:
         raw = self.ser.readline()
         if not raw:
             return None
         line = raw.decode("utf-8", errors="replace").rstrip()
-        if line:
+        if line and not (quiet_ksd_block_ack and line == "KSD:B"):
             logging.info("K210: %s", line)
         return line
 
@@ -192,15 +192,40 @@ class KsdAutoClient:
         logging.info("sd-uart RESET")
         self.write_command("RESET\n")
         self.stage_line(("KSD:RESETTING", "KSD:ERR"), "RESET ACK")
-        logging.info("stage: K210 rebooted; monitoring ESP flash result")
-        stop_markers = ("ESP flash result: OK", "ESP flash result: FAIL", "[esp-flash] done", "[esp-flash] connect failed")
-        while True:
+        logging.info("stage: K210 rebooted; monitoring ESP boot result")
+        success_markers = (
+            "ESP flash result: OK",
+            "[esp-flash] done",
+            "kesp: version=",
+            "kesp: wifi begin",
+        )
+        hard_fail_markers = (
+            "ESP flash result: FAIL",
+            "[esp-flash] connect failed",
+            "[esp-flash] image missing",
+            "[esp-flash] bad image size",
+        )
+        soft_fail_markers = (
+            "[esp-flash] finish failed",
+        )
+        deadline = time.monotonic() + 180.0
+        saw_soft_fail = False
+        while time.monotonic() < deadline:
             line = self.read_line_once()
             if not line:
                 continue
-            if any(marker in line for marker in stop_markers):
-                logging.info("sd-uart monitor: stop marker found")
+            if any(marker in line for marker in success_markers):
+                if saw_soft_fail:
+                    logging.warning("sd-uart monitor: ESP booted after flash finish warning")
+                else:
+                    logging.info("sd-uart monitor: ESP boot marker found")
                 return
+            if any(marker in line for marker in hard_fail_markers):
+                raise SystemExit(f"K210 ESP flash failed: {line}")
+            if any(marker in line for marker in soft_fail_markers):
+                saw_soft_fail = True
+                logging.warning("sd-uart monitor: %s; waiting for ESP boot log", line)
+        raise SystemExit("K210 ESP monitor timeout: no kesp boot/version log")
 
 
 def upload_sd_uart(port: str, baud: int, parts: list[base.FlashPart], reset_mode: str) -> None:
@@ -236,7 +261,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--firmware")
     ap.add_argument("--remote-name")
     ap.add_argument("--offset", default="0x0")
-    ap.add_argument("--full-flash", action="store_true")
+    ap.add_argument("--full-flash", action="store_true", help="Legacy no-op: app-only firmware.bin is now the default")
+    ap.add_argument("--force-full-flash", action="store_true", help="Actually upload and flash the 1 MB merged image")
     return ap.parse_args()
 
 
@@ -246,6 +272,10 @@ def main() -> int:
     logging.info("repo: %s", base.ROOT)
     logging.info("log: %s", log_path)
     logging.info("mode: automatic SD UART upload")
+
+    if args.full_flash and not args.force_full_flash:
+        logging.warning("--full-flash is legacy/no-op now; using fast app-only firmware.bin. Use --force-full-flash only when a real 1 MB rewrite is needed.")
+    args.full_flash = bool(args.force_full_flash)
 
     if not args.no_build and not args.firmware:
         base.build_platformio(args.env)
