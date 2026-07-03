@@ -5,10 +5,12 @@ if "%PORT%"=="" set "PORT=COM12"
 set "ESP_DIR=%~dp0"
 set "K210_DIR=D:\w_space\K210_AI_V7s_Plus"
 set "K210_FLASH_BAUD=921600"
+set "KSD_CONNECT_TIMEOUT=65"
 
 echo === RTOS pure SPI test, one K210 diagnostic loader ===
 echo Port: %PORT%
 echo K210 flash baud: %K210_FLASH_BAUD%
+echo KSD connect timeout: %KSD_CONNECT_TIMEOUT%s
 
 if not exist "%K210_DIR%\.git" exit /b 2
 
@@ -27,5 +29,5 @@ call build_k210.bat || exit /b 40
 call flash_k210.bat %PORT% --no-build --baud %K210_FLASH_BAUD% || exit /b 41
 
 cd /d "%ESP_DIR%" || exit /b 2
-call upload_esp_payload_uart.bat %PORT% --connect-timeout 25 || exit /b 50
+call upload_esp_payload_uart.bat %PORT% --connect-timeout %KSD_CONNECT_TIMEOUT% || exit /b 50
 exit /b 0
