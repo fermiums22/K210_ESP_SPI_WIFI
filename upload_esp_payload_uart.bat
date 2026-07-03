@@ -28,9 +28,11 @@ if %ERRORLEVEL%==0 (
 )
 
 echo Python command: %PY%
+echo Waiting window: 120 seconds
 echo Start this script, then press RESET on K210 if it is already showing the normal screen.
+echo Do NOT hold BOOT. Close other serial monitors first.
 echo.
-%PY% tools\send_flash_payload.py --no-build --sd-uart %PORT% %EXTRA%
+%PY% tools\send_flash_payload.py --no-build --sd-uart %PORT% --timeout 120 %EXTRA%
 if errorlevel 1 (
   echo.
   echo FAILED. Send console output and logs\flash_payload_*.log here.
