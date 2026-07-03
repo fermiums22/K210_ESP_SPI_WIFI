@@ -39,6 +39,32 @@ ensure_python_cmd()
     exit 2
 }
 
+ensure_python_pkg_resources()
+{
+    if python - <<'PY'
+import pkg_resources
+PY
+    then
+        return 0
+    fi
+
+    echo "Python pkg_resources not found. Installing MSYS python-setuptools..."
+    if command -v pacman >/dev/null 2>&1; then
+        pacman -S --needed --noconfirm python-setuptools
+    fi
+
+    if python - <<'PY'
+import pkg_resources
+PY
+    then
+        return 0
+    fi
+
+    echo "ERROR: Python pkg_resources is still missing."
+    echo "Try manually in MSYS2: pacman -S --needed python python-setuptools"
+    exit 4
+}
+
 ensure_toolchain_cmd()
 {
     export PATH="$TOOLCHAIN_BIN:$PATH"
@@ -54,6 +80,7 @@ ensure_toolchain_cmd()
 
 cd "$SDK"
 ensure_python_cmd
+ensure_python_pkg_resources
 ensure_toolchain_cmd
 
 export IDF_PATH="$SDK"
