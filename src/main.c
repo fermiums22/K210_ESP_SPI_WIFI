@@ -5,8 +5,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "esp_system.h"
-#include "esp_log.h"
 #include "esp8266/spi_struct.h"
 #include "driver/spi.h"
 #include "driver/uart.h"
@@ -19,8 +17,6 @@
 #define SPI_FRAME_BYTES     32u
 #define SPI_FRAME_WORDS     16u  /* ESP8266 SPI slave FIFO is 16 x 32-bit = 64 bytes. */
 #define HSPI_IF_MODE0_RAW   0x1c0u
-
-static const char *TAG = "kesp-rtos-spi";
 
 static volatile uint32_t s_rx_count;
 static volatile uint32_t s_rd_done_count;
@@ -132,7 +128,7 @@ void app_main(void)
 
     spi_slave_init();
 
-    ESP_LOGI(TAG, "spi slave init done");
+    printf("kesp-rtos-spi-test: spi slave init done\n");
     printf("kesp: spi slave ready\n");
     printf("kesp-rtos-spi-test: ready\n");
 
