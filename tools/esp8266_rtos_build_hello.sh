@@ -5,6 +5,7 @@ SDK="/d/w_space/esp8266_sdk/ESP8266_RTOS_SDK"
 PROJ="/d/w_space/K210_ESP_SPI_WIFI/esp8266_rtos_clean/hello_uart"
 TOOLCHAIN_BIN="/d/w_space/esp8266_sdk/xtensa-lx106-elf/bin"
 SETUP_SCRIPT="/d/w_space/K210_ESP_SPI_WIFI/tools/esp8266_rtos_msys_setup.sh"
+PY_SHIMS="/d/w_space/K210_ESP_SPI_WIFI/tools/python_shims"
 
 ensure_toolchain_cmd()
 {
@@ -33,10 +34,16 @@ ensure_toolchain_cmd
 
 export IDF_PATH="$SDK"
 export IDF_PYTHON_ENV_PATH=""
+export PYTHONPATH="$PY_SHIMS${PYTHONPATH:+:$PYTHONPATH}"
 
 python --version
 make --version | head -n 1
 xtensa-lx106-elf-gcc --version | head -n 1
+python - <<'PY'
+import pkg_resources
+pkg_resources.require('setuptools')
+print('pkg_resources shim smoke test OK')
+PY
 
 # The v3.4 SDK has an obsolete nested tinydtls URL under the optional CoAP module.
 # hello_uart does not use CoAP, so do not block bring-up on that nested submodule.
