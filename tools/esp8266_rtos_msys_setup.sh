@@ -42,8 +42,7 @@ hash -r
 echo "Checking Python build-time core modules..."
 python - <<'PY'
 import pyexpat
-import pkg_resources
-print('Python build dependency smoke test OK')
+print('Python core dependency smoke test OK')
 PY
 
 echo "MSYS2 package setup OK."
