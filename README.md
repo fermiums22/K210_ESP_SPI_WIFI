@@ -1,238 +1,153 @@
 # K210_ESP_SPI_WIFI
 
-ESP8285 firmware for the Wi-Fi/SPI bridge used by `K210_AI_V7s_Plus`.
+ESP8285 bring-up repository for the K210 + ESP8285 link.
 
-## Главная цель всей связки K210 + ESP8285
+Current branch policy: **use `main` only**. Old experiment branches are not part of the normal workflow anymore.
 
-Нужно сделать нормальный рабочий цикл разработки и прошивки для связки:
+## Current actual status
 
-- **K210_AI_V7s_Plus** — прошивка K210 / Maix Dock / M1W.
-- **K210_ESP_SPI_WIFI** — прошивка ESP8285, который должен быть Wi-Fi/SPI мостом для K210.
+The current working state is intentionally small and repeatable:
 
-Финальная цель:
+1. ESP8285 firmware is built with **official Espressif ESP8266_RTOS_SDK v3.4**.
+2. Build is started from normal Windows `cmd.exe`, but the actual ESP build runs through **MSYS2**.
+3. Current ESP application is `hello_uart`:
+   - boots under RTOS SDK;
+   - prints SDK/chip/flash info;
+   - prints `alive seq=...` every second on UART at 115200 baud.
+4. K210 is used as a diagnostic loader:
+   - PC talks to K210 over COM12 / 921600 using the KSD protocol;
+   - PC writes ESP flash payload files to the K210 SD card;
+   - PC sends `FLASH_ESP`;
+   - K210 flashes ESP8285 over ESP UART/BOOT/EN pins;
+   - K210 then bridges ESP UART logs back to PC.
 
-1. Собирать прошивку ESP8285 из этой репы.
-2. Через скрипт с ПК заливать файлы прошивки на SD-карту K210 по UART.
-3. Скрипт должен:
-   - получить доступ к SD через UART;
-   - считать актуальный `flash.json`;
-   - изменить в нём только нужную секцию прошивки ESP;
-   - записать `.bin` и обновлённый `flash.json` обратно на SD;
-   - перезагрузить K210;
-   - логировать все этапы.
-4. K210 после перезагрузки должен:
-   - прочитать `flash.json`;
-   - увидеть, что требуется прошить ESP;
-   - сразу изменить config так, чтобы не прошиваться бесконечно при следующем старте;
-   - прошить ESP;
-   - залогировать результат `OK` или `FAIL`.
+This is the stable checkpoint before implementing the final RTOS Wi-Fi/SPI bridge.
 
-Критически важно: даже если прошивка ESP неудачная, K210 не должен уходить в вечный цикл прошивки.
+## One-command test
 
-Текущая практическая цель: собрать ESP8285 firmware на Windows, положить payload на SD-карту K210 через debug UART (`KSD1` protocol), перезагрузить K210 и дать K210 прошить ESP8285 из SD.
-
-## Текущий режим разработки с ИИ / оператором
-
-Работаем короткими итерациями:
-
-1. ИИ правит код/скрипты прямо в GitHub и коммитит в `main`.
-2. Виктор у себя делает `git pull`, запускает одну-две команды и сразу смотрит реальный вывод железа.
-3. Если видно, что пошло не туда, Виктор сразу дропает попытку и присылает console output / `logs\flash_payload_*.log`.
-4. ИИ не пытается "сам всё выполнить в фоне" и не держит длинные терминальные сессии. Это быстрее, потому что оператор видит железо, экран, COM-порты, reset/boot поведение и может остановить ошибочный путь раньше.
-5. Скрипты должны быть разделены по смыслу: отдельно сборка, отдельно upload/terminal/monitor. Не надо ради просмотра UART окна пересобирать весь PlatformIO project.
-
-Правило для новых правок: build не должен менять tracked-файлы. Generated outputs должны лежать только в ignored директориях (`.pio/`, `out/`, `logs/`).
-
-## Preferred flashing chain: PC -> K210 SD UART -> SD -> K210 flashes ESP
-
-```text
-Windows PC
-  |
-  | debug UART COMx, KSD1 protocol
-  v
-K210_AI_V7s_Plus firmware
-  |
-  | writes payload to SD: esp8285_at.bin + flash.json
-  v
-K210 RESET
-  |
-  | flash.json enables one-shot ESP flashing
-  v
-K210 disarms flash.json first, then flashes ESP8285 through UART2 + EN/BOOT pins
-```
-
-`flash.json` is disarmed by K210 before flashing, so the ESP is not flashed again on every boot.
-
-## One-time Windows setup
-
-From the repository folder:
+From Windows `cmd.exe`:
 
 ```bat
-cd /d D:\w_space\K210_ESP_SPI_WIFI
-py -3 -m pip install -r requirements.txt
+cd /d D:\w_space\K210_AI_V7s_Plus && git fetch origin --prune && git checkout main && git pull --ff-only origin main && build_k210.bat && flash_k210.bat COM12 --no-build && cd /d D:\w_space\K210_ESP_SPI_WIFI && git fetch origin --prune && git checkout main && git pull --ff-only origin main && run_esp8285_rtos_hello_via_k210.bat COM12
 ```
 
-If `py -3` is missing, install current Python for Windows and enable `Add python.exe to PATH` during installation.
+Expected ESP log after successful flash and boot:
 
-## Current recommended workflow: split build and upload
+```text
+BOOT: ESP8285 / ESP8266 RTOS SDK hello_uart
+SDK version: ...
+Flash size=1048576 bytes (1 MB)
+alive seq=0 tick=...
+alive seq=1 tick=...
+```
 
-### 1. Build ESP payload only
+## Build ESP RTOS hello only
 
 ```bat
-cd /d D:\w_space\K210_ESP_SPI_WIFI
-git pull
-build_esp_payload.bat
+cd /d D:\w_space\K210_ESP_SPI_WIFI && git fetch origin --prune && git checkout main && git pull --ff-only origin main && run_esp8285_rtos_hello_build.bat
 ```
 
-This runs PlatformIO and prepares files in:
+Expected result:
 
 ```text
-out\flash_payload\
-  esp8285_at.bin
-  flash.json
+OK: ESP8285 RTOS SDK hello build finished.
 ```
 
-### 2. Upload existing payload through K210 UART, without rebuild
+Build outputs are generated locally under:
+
+```text
+esp8266_rtos_clean\hello_uart\build\
+```
+
+Important files:
+
+```text
+bootloader\bootloader.bin              -> offset 0x00000000
+partitions_1mb_singleapp.bin           -> offset 0x00008000
+esp8285-hello-uart.bin                 -> offset 0x00010000
+```
+
+## Flash ESP RTOS hello through K210
 
 ```bat
-upload_esp_payload_uart.bat COM12
+cd /d D:\w_space\K210_ESP_SPI_WIFI && run_esp8285_rtos_hello_via_k210.bat COM12
 ```
 
-`COM12` заменить на реальный K210/CH340 COM-порт.
+This command:
 
-Important timing:
+1. builds ESP RTOS hello through MSYS2;
+2. opens K210 KSD service on COM12 / 921600;
+3. writes ESP payload files to the K210 SD card;
+4. sends `FLASH_ESP`;
+5. waits for ESP RTOS hello UART log.
 
-1. Start `upload_esp_payload_uart.bat COM12`.
-2. If K210 is already showing `no host` / normal screen, press **RESET** on K210.
-3. The script must catch the K210 boot window and connect to `KSD:READY` / `KSD:HELLO`.
+## Why Arduino path was stopped
 
-Expected upload log:
+Arduino was useful only as a very quick early Wi-Fi/TCP/SPI experiment.
+
+We stopped using it because:
+
+- the target project must use a normal RTOS SDK, not Arduino;
+- ESP8266 Arduino `SPISlave` showed unstable/laggy SPI behavior for this use case;
+- keeping Arduino in the repo started to hide real RTOS bring-up problems;
+- it made the flow look more complete than it actually was.
+
+Therefore Arduino source was removed from the normal `main` flow.
+
+## Why PlatformIO RTOS path was stopped
+
+PlatformIO was also tested as an ESP8266 RTOS build wrapper.
+
+We stopped using it because:
+
+- the ESP8266 RTOS support in PlatformIO is old and unclear;
+- the exact toolchain/package mapping is not transparent enough for a repeatable product workflow;
+- it mixed `.pio` artifacts and framework assumptions into the repo;
+- it was hard to reason about which SDK/toolchain version was actually used.
+
+The selected direction is now explicit:
 
 ```text
-K210: KSD:READY
-K210: KSD:HELLO
-sd-uart: connected
-sd-uart GET flash.json
-sd-uart PUT esp8285_at.bin
-sd-uart PUT flash.json
-sd-uart RESET
-K210: KSD:RESETTING
+Windows cmd -> C:\msys64\usr\bin\bash.exe -> official ESP8266_RTOS_SDK v3.4 -> xtensa-lx106-elf gcc8_4_0
 ```
 
-After reset, K210 should read `flash.json`, disarm it, and flash ESP8285. Good final signs:
+## What was achieved
+
+- K210 side can be built/flashed from `main`.
+- K210 command firmware has persistent KSD service.
+- K210 no longer waits through a long SD mount retry loop.
+- ESP official RTOS SDK toolchain can build a real ESP8285 app from MSYS2.
+- ESP flash artifacts are known and mapped to explicit offsets.
+- A K210-based upload path exists for flashing those RTOS artifacts through K210.
+
+## What is not implemented yet
+
+The final target is still:
 
 ```text
-[esp-flash] config flash_once ESP job found
-[esp-flash] connected target=ESP8266/ESP8285
-[esp-flash] progress ...
-ESP flash result: OK
+PC -> Wi-Fi -> ESP8285 RTOS -> SPI -> K210 -> SD read/write
 ```
 
-## All-in-one command
+This is **not implemented yet** on the selected official RTOS SDK path.
 
-This command still exists:
+Next real development step:
 
-```bat
-flash_esp_via_k210.bat --sd-uart COM12
-```
+1. add Wi-Fi station mode in ESP8266_RTOS_SDK;
+2. add TCP PUT server;
+3. add RTOS SPI slave transfer layer;
+4. keep the K210 SPI scanner/receiver simple and measurable;
+5. only then return to PC -> Wi-Fi -> SPI -> SD throughput tests.
 
-But it means **build + upload**. For debugging K210 boot-window / UART timing, prefer the split workflow above. Otherwise PlatformIO build can take longer than K210's 5-second SD UART window, and the script will miss the service.
-
-## Legacy TCP/Wi-Fi bridge mode
-
-Older flow is still available after ESP bridge firmware is already alive and prints an IP:
+## Repository map
 
 ```text
-kesp: ip=192.168.1.123 status=3 spi=1 rx=0 B/s
-```
-
-Then run:
-
-```bat
-flash_esp_via_k210.bat --host 192.168.1.123 --monitor COM12
-```
-
-Replace:
-
-- `192.168.1.123` with the IP printed by the ESP bridge or shown by your router.
-- `COM12` with the K210 USB/CH340 COM port.
-
-This mode is not the preferred bring-up path right now, because the current target is to flash/recover ESP8285 through K210 SD UART even when ESP Wi-Fi firmware is broken.
-
-## If you only want to prepare files, without upload
-
-```bat
-flash_esp_via_k210.bat --dry-run
-```
-
-or the clearer wrapper:
-
-```bat
-build_esp_payload.bat
-```
-
-Generated files will be in:
-
-```text
-out/flash_payload/
-```
-
-## If you already have a ready `.bin`
-
-Upload one explicit firmware image without PlatformIO rebuild:
-
-```bat
-upload_esp_payload_uart.bat COM12 --firmware firmware\esp8285_at.bin --remote-name esp8285_at.bin --offset 0x0
-```
-
-This sends one image and patches `flash.json` with one part at offset `0x00000000`.
-
-## What log to send back
-
-Send the newest file from:
-
-```text
-logs\flash_payload_*.log
-```
-
-Also useful: copy the K210 serial console if it shows `[esp-flash]` errors.
-
-Good signs:
-
-```text
-KSD:READY
-KSD:HELLO
-sd-uart PUT esp8285_at.bin
-sd-uart PUT flash.json
-KSD:RESETTING
-[esp-flash] config flash_once ESP job found
-[esp-flash] connected target=ESP8266/ESP8285
-[esp-flash] progress ...
-ESP flash result: OK
-```
-
-Bad signs to send here:
-
-```text
-K210 SD UART service did not answer
-[esp-flash] image missing
-[esp-flash] connect failed
-[esp-flash] write failed
-ESP flash result: FAIL
-```
-
-## Repo files
-
-```text
-platformio.ini                  PlatformIO ESP8285 project
-src/main.cpp                    ESP8285 Wi-Fi/TCP to SPI bridge
-tools/merge_image.py            PlatformIO post-build helper
-tools/send_flash_payload.py     Python sender + payload/log collector
-flash_esp_via_k210.bat          all-in-one build + upload wrapper
-build_esp_payload.bat           build/prepare payload only
-upload_esp_payload_uart.bat     upload existing payload through K210 UART, no rebuild
-requirements.txt                Python tools for helper script
-.pio/                           generated PlatformIO build output, ignored
-out/flash_payload/              generated payload files, ignored
-logs/                           generated run logs, ignored
+esp8266_rtos_clean/hello_uart/          Current official RTOS SDK hello project
+run_esp8285_rtos_hello_build.bat        Build ESP RTOS hello through MSYS2
+run_esp8285_rtos_hello_via_k210.bat     Build + upload + flash via K210 KSD
+tools/esp8266_rtos_build_hello.sh       MSYS build helper
+tools/esp8266_rtos_msys_setup.sh        MSYS/Python dependency setup
+tools/upload_rtos_hello_via_k210.py     K210 KSD upload helper
+tools/send_flash_payload*.py            Shared KSD payload helpers
+out/                                    Generated payload files, ignored
+logs/                                   Generated logs, ignored
 ```
