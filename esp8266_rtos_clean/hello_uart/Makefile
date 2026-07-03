@@ -14,6 +14,7 @@ COMPONENTS := \
     log \
     lwip \
     main \
+    mbedtls \
     newlib \
     nvs_flash \
     partition_table \
