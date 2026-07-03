@@ -18,6 +18,7 @@ COMPONENTS := \
     newlib \
     nvs_flash \
     partition_table \
+    pthread \
     spi_flash \
     tcpip_adapter \
     vfs \
