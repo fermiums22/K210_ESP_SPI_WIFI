@@ -21,6 +21,7 @@ if errorlevel 1 goto fail
 echo.
 echo DONE. Exit code: 0
 echo.
+if "%KESP_NO_PAUSE%"=="1" exit /b 0
 echo Window will not close automatically.
 pause
 exit /b 0
@@ -29,6 +30,7 @@ exit /b 0
 echo.
 echo FAILED. Exit code: 1
 echo.
+if "%KESP_NO_PAUSE%"=="1" exit /b 1
 echo Window will not close automatically.
 pause
 exit /b 1
