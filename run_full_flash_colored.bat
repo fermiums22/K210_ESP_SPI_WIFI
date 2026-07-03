@@ -6,9 +6,9 @@ if "%PORT%"=="" set "PORT=COM12"
 
 cd /d "%~dp0"
 
-echo === K210 + ESP8285 ESP-only flash ===
+echo === K210 + ESP8285 RTOS SPI ESP-only flash ===
 echo Port: %PORT%
-echo Flow: ESP build, SD upload, K210 reset, ESP boot monitor.
+echo Flow: ESP RTOS build, SD upload, FLASH_ESP command, RUN_SPI verdict monitor.
 echo K210 app build/flash is intentionally skipped.
 echo.
 
