@@ -70,7 +70,20 @@ static void spi_slave_init(void)
     load_static_pattern();
 }
 
-void app_main(void)
+static void spi_alive_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        printf("kesp-rtos-spi-test: alive next_seq=%lu tx0=%08lx tx1=%08lx\n",
+               (unsigned long)s_seq,
+               (unsigned long)s_tx_words[0],
+               (unsigned long)s_tx_words[1]);
+    }
+}
+
+/* ESP8266 RTOS SDK 1.5 uses the old SDK entrypoint, not ESP-IDF app_main(). */
+void user_init(void)
 {
     printf("\n");
     printf("kesp-rtos-spi-test: boot version=%s\n", KESP_VERSION);
@@ -84,11 +97,13 @@ void app_main(void)
     printf("kesp: spi slave ready\n");
     printf("kesp-rtos-spi-test: ready\n");
 
-    for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        printf("kesp-rtos-spi-test: alive next_seq=%lu tx0=%08lx tx1=%08lx\n",
-               (unsigned long)s_seq,
-               (unsigned long)s_tx_words[0],
-               (unsigned long)s_tx_words[1]);
-    }
+    xTaskCreate(spi_alive_task, "spi_alive", 256, NULL, 2, NULL);
+}
+
+/* For 1 MB ESP8285 flash: RF calibration sector is normally sector 251
+ * (0xFB000).  This satisfies the old SDK link requirement and keeps the test
+ * firmware independent from Wi-Fi. */
+uint32_t user_rf_cal_sector_set(void)
+{
+    return 251;
 }
