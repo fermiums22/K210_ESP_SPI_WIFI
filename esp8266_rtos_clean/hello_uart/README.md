@@ -30,12 +30,19 @@ pacman -S --needed --noconfirm \
   cmake ninja flex bison gperf gettext-devel ncurses-devel libexpat
 ```
 
-The setup script smoke-tests only the Python modules needed for the current build stage:
+The setup script smoke-tests only the Python core module needed before build:
 
 ```python
 import pyexpat
-import pkg_resources
 ```
+
+`ESP8266_RTOS_SDK v3.4` still imports `pkg_resources` in `tools/check_python_dependencies.py`. Modern MSYS Python 3.12 may not provide that module even when `python-setuptools` is installed, so the build helper adds this local shim to `PYTHONPATH` before running `make`:
+
+```text
+tools/python_shims/pkg_resources.py
+```
+
+The shim only implements the `require()` call used by the SDK dependency checker. It is not a general replacement for `pkg_resources`.
 
 The ESP8266 xtensa toolchain is separate and is downloaded by the Windows `.bat` helper into:
 
