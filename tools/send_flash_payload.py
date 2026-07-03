@@ -289,11 +289,17 @@ class KsdClient:
 
     def connect(self, timeout_s: float) -> None:
         logging.info("sd-uart: opening %s @ %d", self.port, self.baud)
-        logging.info("sd-uart: reset/power-cycle K210 now if it is already running normal app")
+        logging.info("sd-uart: waiting up to %.0f seconds for K210 KSD boot window", timeout_s)
+        logging.info("ACTION: press RESET on K210 now if it is already showing the normal screen. Do NOT hold BOOT.")
         deadline = time.monotonic() + timeout_s
         next_magic = 0.0
+        next_hint = 0.0
         while time.monotonic() < deadline:
             now = time.monotonic()
+            if now >= next_hint:
+                remaining = max(0.0, deadline - now)
+                logging.info("sd-uart: waiting for KSD:READY/HELLO... %.0f s left", remaining)
+                next_hint = now + 3.0
             if now >= next_magic:
                 self.write(KSD_MAGIC)
                 next_magic = now + 0.25
@@ -301,10 +307,18 @@ class KsdClient:
                 line = self.read_ksd_line(0.25, ("KSD:HELLO", "KSD:READY"))
             except TimeoutError:
                 continue
+            if line.startswith("KSD:READY"):
+                logging.info("sd-uart: KSD:READY seen, sending HELLO magic")
+                self.write(KSD_MAGIC)
+                next_magic = time.monotonic() + 0.25
+                continue
             if line.startswith("KSD:HELLO"):
                 logging.info("sd-uart: connected")
                 return
-        raise SystemExit("K210 SD UART service did not answer. Start script, then reset K210 during its boot window.")
+        raise SystemExit(
+            "K210 SD UART service did not answer. Check that COM port belongs to the K210 debug UART, "
+            "close any serial monitor, start upload first, then press RESET during the K210 boot window."
+        )
 
     def wait_cmd(self) -> None:
         self.read_ksd_line(10.0, ("KSD:CMD",))
@@ -409,7 +423,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--offset", default="0x0", help="Flash offset for --firmware, default 0x0")
     ap.add_argument("--full-flash", action="store_true", help="Use generated 1 MB merged image instead of default firmware.bin")
     ap.add_argument("--dry-run", action="store_true", help="Build/prepare only, do not send")
-    ap.add_argument("--timeout", type=float, default=45.0, help="Connect/transfer timeout seconds")
+    ap.add_argument("--timeout", type=float, default=120.0, help="Connect/transfer timeout seconds")
     ap.add_argument("--monitor", help="Legacy: after TCP upload, monitor K210 serial COM port")
     ap.add_argument("--monitor-baud", type=int, default=115200)
     ap.add_argument("--monitor-timeout", type=int, default=180)
