@@ -196,12 +196,19 @@ class KsdAutoClient:
         logging.info("sd-uart RESET")
         self.write_command("RESET\n")
         self.stage_line(("KSD:RESETTING", "KSD:ERR"), "RESET ACK")
-        logging.info("stage: K210 rebooted; monitoring ESP boot result")
+        logging.info("stage: K210 rebooted; monitoring ESP WiFi/SPI result")
         success_markers = (
-            "ESP flash result: OK",
+            "kesp: wifi connected",
+            "kesp: ap fallback started",
+            "kesp: spi slave ready",
+        )
+        boot_markers = (
             "[esp-flash] done",
+            "ESP flash result: OK",
+            "kesp: boot",
             "kesp: version=",
             "kesp: wifi begin",
+            "[wifi-spi] ready",
         )
         hard_fail_markers = (
             "ESP flash result: FAIL",
@@ -212,24 +219,29 @@ class KsdAutoClient:
         soft_fail_markers = (
             "[esp-flash] finish failed",
         )
-        deadline = time.monotonic() + 180.0
+        deadline = time.monotonic() + 210.0
+        saw_boot_activity = False
         saw_soft_fail = False
         while time.monotonic() < deadline:
             line = self.read_line_once()
             if not line:
                 continue
+            if any(marker in line for marker in boot_markers):
+                saw_boot_activity = True
             if any(marker in line for marker in success_markers):
                 if saw_soft_fail:
-                    logging.warning("sd-uart monitor: ESP booted after flash finish warning")
+                    logging.warning("sd-uart monitor: ESP WiFi/SPI started after flash finish warning")
                 else:
-                    logging.info("sd-uart monitor: ESP boot marker found")
+                    logging.info("sd-uart monitor: ESP WiFi/SPI marker found")
                 return
             if any(marker in line for marker in hard_fail_markers):
                 raise SystemExit(f"K210 ESP flash failed: {line}")
             if any(marker in line for marker in soft_fail_markers):
                 saw_soft_fail = True
-                logging.warning("sd-uart monitor: %s; waiting for ESP boot log", line)
-        raise SystemExit("K210 ESP monitor timeout: no kesp boot/version log")
+                logging.warning("sd-uart monitor: %s; waiting for ESP boot/WiFi log", line)
+        if saw_boot_activity:
+            raise SystemExit("K210 ESP monitor timeout: ESP booted but no WiFi/AP/SPI-ready log")
+        raise SystemExit("K210 ESP monitor timeout: no ESP boot log")
 
 
 def upload_sd_uart(port: str, baud: int, parts: list[base.FlashPart], reset_mode: str) -> None:
