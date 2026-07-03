@@ -18,6 +18,7 @@ COMPONENTS := \
     nvs_flash \
     partition_table \
     spi_flash \
-    tcpip_adapter
+    tcpip_adapter \
+    vfs
 
 include $(IDF_PATH)/make/project.mk
