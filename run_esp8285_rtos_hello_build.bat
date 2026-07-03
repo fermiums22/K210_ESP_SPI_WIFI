@@ -31,7 +31,7 @@ if not exist "%TOOLCHAIN_GCC%" (
 )
 
 echo Running ESP8285 RTOS SDK hello build...
-"%BASH%" -lc "export MSYSTEM=MINGW32; source /etc/profile; export PATH=/d/w_space/esp8266_sdk/xtensa-lx106-elf/bin:^$PATH; export IDF_PATH=/d/w_space/esp8266_sdk/ESP8266_RTOS_SDK; bash '%HELPER%'"
+"%BASH%" -lc "export MSYSTEM=MINGW32; source /etc/profile; export IDF_PATH=/d/w_space/esp8266_sdk/ESP8266_RTOS_SDK; bash '%HELPER%'"
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (
