@@ -42,5 +42,5 @@ if not exist "%TOOLCHAIN_GCC%" (
 
 echo Flashing ESP8285 RTOS SDK hello to %ESPPORT% at %ESPBAUD%...
 echo Make sure ESP GPIO0 is LOW during reset and UART0 is connected directly.
-"%BASH%" -lc "export MSYSTEM=MINGW32; source /etc/profile; export PATH=/d/w_space/esp8266_sdk/xtensa-lx106-elf/bin:^$PATH; export IDF_PATH=/d/w_space/esp8266_sdk/ESP8266_RTOS_SDK; bash '%HELPER%' '%ESPPORT%' '%ESPBAUD%'"
+"%BASH%" -lc "export MSYSTEM=MINGW32; source /etc/profile; export IDF_PATH=/d/w_space/esp8266_sdk/ESP8266_RTOS_SDK; bash '%HELPER%' '%ESPPORT%' '%ESPBAUD%'"
 exit /b %ERRORLEVEL%
