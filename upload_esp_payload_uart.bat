@@ -28,9 +28,9 @@ if %ERRORLEVEL%==0 (
 )
 
 echo Python command: %PY%
-echo Waiting for K210 KSD handshake without a deadline.
-echo Start this script, then press RESET on K210 if it is already showing the normal screen.
-echo Close other serial monitors first.
+echo STEP 1: PC opens COM and listens for K210 boot SD service.
+echo No SD write and no ESP flash at this stage.
+echo Follow the action line printed by Python.
 echo.
 %PY% tools\send_flash_payload.py --no-build --sd-uart %PORT% %EXTRA%
 if errorlevel 1 (
