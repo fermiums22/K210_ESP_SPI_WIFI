@@ -20,6 +20,7 @@ cd /d "%K210_DIR%" || exit /b 2
 git fetch origin || exit /b 30
 git checkout spi-uart-test || exit /b 31
 git pull --ff-only origin spi-uart-test || exit /b 32
+py -3 "%ESP_DIR%tools\patch_k210_fast_esp_baud.py" "%K210_DIR%" --baud 921600 || exit /b 33
 call build_k210.bat || exit /b 40
 call flash_k210.bat %PORT% --no-build || exit /b 41
 
