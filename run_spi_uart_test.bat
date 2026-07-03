@@ -35,6 +35,7 @@ git checkout spi-uart-test || exit /b 31
 git pull --ff-only origin spi-uart-test || exit /b 32
 
 echo === ESP: build + flash pure SPISlave tester through K210/KSD ===
+set "KESP_NO_PAUSE=1"
 call run_full_flash_colored.bat %PORT% || exit /b 40
 
 echo === Monitor pure SPI test ===
