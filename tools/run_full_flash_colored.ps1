@@ -3,7 +3,7 @@ param(
     [switch]$NoFullFlash
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 try {
     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -34,7 +34,7 @@ function Strip-Ansi([string]$s) {
 
 function Get-LineColor([string]$s) {
     if ($s -match "(?i)(FATAL|ERROR|\bERR\b|FAILED|FAIL|timeout|command RX timeout|KSD:ERR)") { return "Red" }
-    if ($s -match "(?i)(WARNING|WARN|full 1 MB|erase)") { return "Yellow" }
+    if ($s -match "(?i)(WARNING|WARN|full 1 MB|erase|Deprecation Warning)") { return "Yellow" }
     if ($s -match "(?i)(SUCCESS|DONE|OK:|KSD:OK|KSD:SIZE|ESP flash result: OK|kesp:)") { return "Green" }
     if ($s -match "(?i)(KSD:|sd-uart|command RX|flash\.json|\bGET\b|\bPUT\b|RESET)") { return "Cyan" }
     if ($s -match "(?i)(esp-uart|ets Jan|boot mode|~ld|kesp:)") { return "Magenta" }
@@ -58,10 +58,11 @@ function Run-Step([string]$Title, [string]$WorkDir, [string]$Command) {
 
     Push-Location $WorkDir
     try {
-        & cmd.exe /d /c $Command 2>&1 | ForEach-Object {
-            Write-LogLine ([string]$_)
-        }
+        $cmdOut = & cmd.exe /d /c $Command 2>&1
         $code = $LASTEXITCODE
+        foreach ($line in $cmdOut) {
+            Write-LogLine ([string]$line)
+        }
     } finally {
         Pop-Location
     }
