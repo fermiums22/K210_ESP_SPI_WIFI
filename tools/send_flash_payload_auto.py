@@ -20,10 +20,6 @@ if str(TOOLS_DIR) not in sys.path:
 
 import send_flash_payload as base  # noqa: E402
 
-DATA_SUBCHUNK = 64
-DATA_SUBCHUNK_DELAY_S = 0.002
-POST_ACK_GUARD_S = 0.15
-
 
 class KsdAutoClient:
     def __init__(self, port: str, baud: int, reset_mode: str):
@@ -44,17 +40,10 @@ class KsdAutoClient:
         self.ser.flush()
 
     def write_command(self, line: str) -> None:
-        data = line.encode("ascii")
-        for b in data:
-            self.ser.write(bytes((b,)))
-            self.ser.flush()
-            time.sleep(0.003)
+        self.write(line.encode("ascii"))
 
     def write_payload_block(self, data: bytes) -> None:
-        for pos in range(0, len(data), DATA_SUBCHUNK):
-            self.ser.write(data[pos:pos + DATA_SUBCHUNK])
-            self.ser.flush()
-            time.sleep(DATA_SUBCHUNK_DELAY_S)
+        self.write(data)
 
     def set_lines(self, dtr: bool, rts: bool, delay_s: float) -> None:
         self.ser.dtr = dtr
@@ -138,7 +127,6 @@ class KsdAutoClient:
 
     def command_prompt(self) -> None:
         self.stage_line(("KSD:CMD",), "K210 command prompt")
-        time.sleep(0.05)
 
     def read_exact_loop(self, size: int) -> bytes:
         data = bytearray()
@@ -176,12 +164,9 @@ class KsdAutoClient:
         line = self.stage_line(("KSD:GO", "KSD:ERR"), f"PUT {remote_name} GO")
         if not line.startswith("KSD:GO"):
             raise SystemExit(f"K210 refused PUT {remote_name}: {line}")
-
-        # K210 prints the ACK on the same debug UART that immediately becomes
-        # the binary receive channel.  Give the adapter/K210 TX path time to
-        # become idle before pushing binary bytes, otherwise the first block can
-        # be lost entirely on this CH340/CH552 board path.
-        time.sleep(POST_ACK_GUARD_S)
+        line = self.stage_line(("KSD:READYDATA", "KSD:ERR"), f"PUT {remote_name} data-ready")
+        if not line.startswith("KSD:READYDATA"):
+            raise SystemExit(f"K210 PUT {remote_name} did not enter data mode: {line}")
 
         sent = 0
         with path.open("rb") as f:
@@ -194,7 +179,6 @@ class KsdAutoClient:
                 line = self.stage_line(("KSD:B", "KSD:ERR"), f"PUT {remote_name} block ACK")
                 if line.startswith("KSD:ERR"):
                     raise SystemExit(f"K210 PUT failed at {sent}/{size}: {line}")
-                time.sleep(POST_ACK_GUARD_S)
                 if sent == size or sent % 32768 == 0:
                     logging.info("sd-uart progress: %s %d/%d", remote_name, sent, size)
         ok = self.stage_line(("KSD:OK", "KSD:ERR"), f"PUT {remote_name} final ACK")
