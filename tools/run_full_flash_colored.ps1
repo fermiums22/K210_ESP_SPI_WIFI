@@ -27,6 +27,7 @@ $LogDir = Join-Path $EspRepo "logs\one_click"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $LogFile = Join-Path $LogDir "full_flash_$Stamp.log"
+$LogWriter = [System.IO.StreamWriter]::new($LogFile, $false, [System.Text.UTF8Encoding]::new($false))
 
 function Strip-Ansi([string]$s) {
     return ($s -replace "`e\[[0-9;?]*[ -/]*[@-~]", "")
@@ -45,8 +46,10 @@ function Get-LineColor([string]$s) {
 }
 
 function Write-LogLine([string]$Line) {
+    if ($null -eq $Line) { return }
     $clean = Strip-Ansi $Line
-    Add-Content -Path $LogFile -Value $clean -Encoding UTF8
+    $script:LogWriter.WriteLine($clean)
+    $script:LogWriter.Flush()
     Write-Host $clean -ForegroundColor (Get-LineColor $clean)
 }
 
@@ -56,18 +59,48 @@ function Run-Step([string]$Title, [string]$WorkDir, [string]$Command) {
     Write-LogLine "DIR: $WorkDir"
     Write-LogLine "CMD: $Command"
 
-    Push-Location $WorkDir
-    try {
-        $cmdOut = & cmd.exe /d /c $Command 2>&1
-        $code = $LASTEXITCODE
-        foreach ($line in $cmdOut) {
-            Write-LogLine ([string]$line)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = "cmd.exe"
+    $psi.Arguments = "/d /c $Command"
+    $psi.WorkingDirectory = $WorkDir
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $p = [System.Diagnostics.Process]::new()
+    $p.StartInfo = $psi
+
+    $outHandler = [System.Diagnostics.DataReceivedEventHandler]{
+        param($sender, $eventArgs)
+        if ($null -ne $eventArgs.Data) {
+            Write-LogLine $eventArgs.Data
         }
-    } finally {
-        Pop-Location
+    }
+    $errHandler = [System.Diagnostics.DataReceivedEventHandler]{
+        param($sender, $eventArgs)
+        if ($null -ne $eventArgs.Data) {
+            Write-LogLine $eventArgs.Data
+        }
     }
 
-    if ($null -eq $code) { $code = 0 }
+    $p.add_OutputDataReceived($outHandler)
+    $p.add_ErrorDataReceived($errHandler)
+
+    [void]$p.Start()
+    $p.BeginOutputReadLine()
+    $p.BeginErrorReadLine()
+
+    while (-not $p.HasExited) {
+        Start-Sleep -Milliseconds 100
+    }
+    $p.WaitForExit()
+
+    $code = $p.ExitCode
+    $p.remove_OutputDataReceived($outHandler)
+    $p.remove_ErrorDataReceived($errHandler)
+    $p.Dispose()
+
     Write-LogLine "EXIT: $code"
     if ($code -ne 0) {
         throw "Step failed: $Title, exit code $code"
@@ -102,6 +135,10 @@ try {
     Write-LogLine ""
     Write-LogLine "FATAL: $($_.Exception.Message)"
 } finally {
+    if ($null -ne $LogWriter) {
+        $LogWriter.Flush()
+        $LogWriter.Close()
+    }
     Write-Host ""
     Write-Host "Saved log:" -ForegroundColor Cyan
     Write-Host $LogFile -ForegroundColor Cyan
