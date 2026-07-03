@@ -42,7 +42,8 @@ xtensa-lx106-elf-gcc --version | head -n 1
 python - <<'PY'
 import pkg_resources
 pkg_resources.require('setuptools')
-print('pkg_resources shim smoke test OK')
+import serial.tools.list_ports
+print('python shim smoke test OK')
 PY
 
 # The v3.4 SDK has an obsolete nested tinydtls URL under the optional CoAP module.
@@ -50,8 +51,9 @@ PY
 # Keep already downloaded useful submodules, but avoid recursive repair here.
 git submodule update --init components/json/cJSON components/lwip/lwip components/mbedtls/mbedtls components/mqtt/esp-mqtt || true
 
-echo "Building hello_uart..."
+echo "Building hello_uart with limited COMPONENTS..."
 cd "$PROJ"
+rm -rf build
 make defconfig
 make -j"${NUMBER_OF_PROCESSORS:-4}"
 
