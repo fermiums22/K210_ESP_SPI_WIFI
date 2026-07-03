@@ -11,6 +11,14 @@ Goal of this step:
 
 This project intentionally does not contain SPI slave, Wi-Fi, TCP, SD or K210 flashing logic yet.
 
+## Why the first build looked huge
+
+It was not compiling the toolchain. The toolchain is already downloaded as `xtensa-lx106-elf-gcc.exe`.
+
+The old ESP8266_RTOS_SDK Make build compiles SDK components into local project libraries on the first build. Without a component limit it starts building many optional components: HTTP server/client, MQTT, mbedTLS, libsodium, lwIP extras, Modbus, FatFS, etc.
+
+For this hello bring-up the project Makefile now limits the component set with `COMPONENTS := ...` so a clean build stays focused on the minimum core plus ESP8266 driver/HAL, Wi-Fi/SPI base, image tools and partition/flash support.
+
 ## SDK location expected by helper scripts
 
 ```text
@@ -42,7 +50,13 @@ import pyexpat
 tools/python_shims/pkg_resources.py
 ```
 
-The shim only implements the `require()` call used by the SDK dependency checker. It is not a general replacement for `pkg_resources`.
+`esptool.py` also imports `serial.tools.list_ports` even when Make only needs to generate `.bin` images. For build-only image generation the helper uses this local shim:
+
+```text
+tools/python_shims/serial/
+```
+
+The serial shim is not enough for real flashing. Direct ESP flashing needs real pyserial, or we use the K210 flashing path later.
 
 The ESP8266 xtensa toolchain is separate and is downloaded by the Windows `.bat` helper into:
 
