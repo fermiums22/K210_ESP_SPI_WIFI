@@ -12,7 +12,7 @@ static const uint16_t TCP_PORT = 7777;
 static const uint32_t FRAME_MAGIC = 0x5053454bUL;
 static const uint32_t UART_BAUD = 115200;
 static const size_t DATA_BYTES = 20;
-static const size_t QUEUE_SIZE = 64;
+static const size_t QUEUE_SIZE = 192;
 static const uint32_t AP_FALLBACK_MS = 30000;
 
 #ifndef LED_BUILTIN
@@ -33,8 +33,9 @@ struct __attribute__((packed)) Frame {
 static WiFiServer server(TCP_PORT);
 static Frame queueBuf[QUEUE_SIZE];
 static Frame spiTxFrame;
-static volatile uint8_t qHead;
-static volatile uint8_t qTail;
+static volatile uint16_t qHead;
+static volatile uint16_t qTail;
+static volatile uint32_t qMaxUsed;
 static bool spiReady;
 static uint8_t seqNo;
 static uint32_t rxBytes;
@@ -74,16 +75,24 @@ static void makeIdle(Frame &f)
     f.type = FT_IDLE;
 }
 
+static uint16_t queueUsedNoIrq()
+{
+    return (qHead >= qTail) ? (qHead - qTail) : (QUEUE_SIZE - qTail + qHead);
+}
+
 static bool enqueue(const Frame &f)
 {
-    uint8_t next = (qHead + 1) % QUEUE_SIZE;
+    uint16_t next = (uint16_t)((qHead + 1) % QUEUE_SIZE);
     while (next == qTail) {
-        delay(1);
+        delay(0);
         yield();
     }
     noInterrupts();
     queueBuf[qHead] = f;
     qHead = next;
+    uint16_t used = queueUsedNoIrq();
+    if (used > qMaxUsed)
+        qMaxUsed = used;
     interrupts();
     return true;
 }
@@ -94,7 +103,7 @@ static bool dequeue(Frame &f)
         return false;
     noInterrupts();
     f = queueBuf[qTail];
-    qTail = (qTail + 1) % QUEUE_SIZE;
+    qTail = (uint16_t)((qTail + 1) % QUEUE_SIZE);
     interrupts();
     return true;
 }
@@ -111,11 +120,10 @@ static void spiStartOnce()
     if (spiReady)
         return;
 
-    SPISlave.onData([](uint8_t *data, size_t len) {
-        (void)data;
-        (void)len;
-        spiLoadNext();
-    });
+    /* readData() on the K210 side only needs the next TX buffer after the
+     * previous buffer was sent.  Loading on both onData and onDataSent can skip
+     * queued frames on some ESP8266 cores, so use onDataSent as the single
+     * producer-to-SPI handoff point. */
     SPISlave.onDataSent([]() {
         spiLoadNext();
     });
@@ -201,26 +209,53 @@ static void handleClient(WiFiClient c)
     Serial.printf("kesp: PUT %s %lu\n", name.c_str(), (unsigned long)size);
     enqueueBegin(name.c_str(), size);
 
-    uint8_t buf[DATA_BYTES];
-    uint8_t n = 0;
+    uint8_t frameBuf[DATA_BYTES];
+    uint8_t frameN = 0;
+    uint8_t netBuf[256];
     uint32_t got = 0;
+    uint32_t startMs = millis();
+
     while (got < size && c.connected()) {
-        int b = c.read();
-        if (b < 0) {
+        int avail = c.available();
+        if (avail <= 0) {
             delay(0);
             continue;
         }
-        buf[n++] = (uint8_t)b;
-        got++;
-        rxBytes++;
-        if (n == DATA_BYTES || got == size) {
-            enqueueData(buf, n);
-            n = 0;
+        uint32_t left = size - got;
+        size_t want = (size_t)avail;
+        if (want > sizeof(netBuf))
+            want = sizeof(netBuf);
+        if (want > left)
+            want = left;
+
+        int r = c.read(netBuf, want);
+        if (r <= 0) {
+            delay(0);
+            continue;
         }
+
+        for (int i = 0; i < r; i++) {
+            frameBuf[frameN++] = netBuf[i];
+            if (frameN == DATA_BYTES) {
+                enqueueData(frameBuf, frameN);
+                frameN = 0;
+            }
+        }
+        got += (uint32_t)r;
+        rxBytes += (uint32_t)r;
     }
+
+    if (frameN)
+        enqueueData(frameBuf, frameN);
     enqueueEnd(got);
     c.printf("OK %lu\n", (unsigned long)got);
-    Serial.printf("kesp: DONE %lu/%lu\n", (unsigned long)got, (unsigned long)size);
+    uint32_t dt = millis() - startMs;
+    if (dt == 0)
+        dt = 1;
+    Serial.printf("kesp: DONE %lu/%lu tcp=%lu B/s qmax=%lu\n",
+                  (unsigned long)got, (unsigned long)size,
+                  (unsigned long)(got * 1000UL / dt),
+                  (unsigned long)qMaxUsed);
 }
 
 static void startFallbackAp()
@@ -315,13 +350,14 @@ void loop()
         lastMs = now;
         ledState = !ledState;
         digitalWrite(LED_BUILTIN, ledState ? LOW : HIGH);
-        Serial.printf("kesp: alive=%lu sta_ip=%s ap_ip=%s status=%d spi=%d rx=%lu B/s\n",
+        Serial.printf("kesp: alive=%lu sta_ip=%s ap_ip=%s status=%d spi=%d rx=%lu B/s qmax=%lu\n",
                       (unsigned long)((now - bootMs) / 1000),
                       WiFi.localIP().toString().c_str(),
                       apStarted ? WiFi.softAPIP().toString().c_str() : "-",
                       WiFi.status(),
                       spiReady ? 1 : 0,
-                      (unsigned long)d);
+                      (unsigned long)d,
+                      (unsigned long)qMaxUsed);
     }
     yield();
 }
