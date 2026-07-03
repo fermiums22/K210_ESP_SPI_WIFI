@@ -10,7 +10,7 @@ echo === Pure UART/GPIO test ===
 echo ESP repo:  %ESP_DIR%
 echo K210 repo: %K210_DIR%
 echo Port:      %PORT%
-echo Flow:      checkout test branches, flash K210 once, build/upload ESP with K210 auto-reset, then monitor.
+echo Flow:      checkout test branches, flash K210 once, build ESP, then use existing KSD only if app is alive.
 echo.
 
 if not exist "%K210_DIR%\.git" (
@@ -37,8 +37,9 @@ git pull --ff-only origin spi-uart-test || exit /b 32
 echo === ESP: build GPIO tester ===
 call build_esp_payload.bat || exit /b 40
 
-echo === ESP: upload/flash through K210 KSD with K210 auto-reset ===
-call upload_esp_payload_uart.bat %PORT% --auto-reset dan || exit /b 41
+echo === ESP: upload/flash through existing K210 KSD, no extra reset ===
+echo If this fails with KSD timeout, K210 app did not start after kflash; do not rerun this loop, reset K210 once and run upload_esp_payload_uart.bat COM12.
+call upload_esp_payload_uart.bat %PORT% || exit /b 41
 
 echo === Monitor GPIO link test ===
 echo Watch for: kesp-gpio-test RESULT and [gpio-test] RESULT.
