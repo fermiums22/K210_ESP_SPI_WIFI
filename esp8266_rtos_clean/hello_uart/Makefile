@@ -19,6 +19,7 @@ COMPONENTS := \
     partition_table \
     spi_flash \
     tcpip_adapter \
-    vfs
+    vfs \
+    wpa_supplicant
 
 include $(IDF_PATH)/make/project.mk
