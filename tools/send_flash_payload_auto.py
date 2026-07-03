@@ -22,6 +22,8 @@ if str(TOOLS_DIR) not in sys.path:
 
 import send_flash_payload as base  # noqa: E402
 
+# Must match K210_AI_V7s_Plus/src/log.h APP_LOG_BAUD.
+KSD_DEFAULT_BAUD = 921600
 # Must match K210_AI_V7s_Plus/src/sd_uart.c UART_SD_BUF after the KSD service update.
 KSD_UPLOAD_CHUNK = 512
 
@@ -291,7 +293,7 @@ def upload_sd_uart(port: str, baud: int, parts: list[base.FlashPart], reset_mode
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Automatic K210 SD UART upload of ESP8285 payload")
     ap.add_argument("--sd-uart", required=True, help="K210 debug UART COM port, e.g. COM12")
-    ap.add_argument("--sd-baud", type=int, default=115200, help="K210 debug UART baud")
+    ap.add_argument("--sd-baud", type=int, default=KSD_DEFAULT_BAUD, help=f"K210 debug UART baud, default {KSD_DEFAULT_BAUD}")
     ap.add_argument("--auto-reset", default="none", choices=("dan", "rts", "dtr", "both", "none"))
     ap.add_argument("--connect-timeout", type=float, default=8.0)
     ap.add_argument("--env", default="esp8285")
