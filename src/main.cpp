@@ -8,7 +8,7 @@
 
 static const char *WIFI_SSID = "Fermiums_2.4";
 static const char *WIFI_PASS = "876543212";
-static const uint16_t TCP_PORT = 7777;
+static const uint16_t TCP_PORT = 18080;
 static const uint32_t FRAME_MAGIC = 0x5053454bUL;
 static const uint32_t UART_BAUD = 115200;
 static const size_t DATA_BYTES = 20;
