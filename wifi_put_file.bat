@@ -24,7 +24,7 @@ if %ERRORLEVEL%==0 (
 )
 
 echo === WiFi TCP PUT ===
-echo Host: %HOST%:7777
+echo Host: %HOST%:18080
 echo File: %FILE%
 echo Remote: %REMOTE%
 echo.
