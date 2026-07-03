@@ -16,6 +16,46 @@ import send_flash_payload as base  # noqa: E402
 from send_flash_payload_auto import KsdAutoClient, KSD_DEFAULT_BAUD  # noqa: E402
 
 
+WRONG_FW_MARKERS = (
+    "[pin-test-main]",
+    "kesp-spi-test: no WiFi, no TCP, no SD; ESP8266 Arduino SPISlave only",
+    "[pure-spi] scan start",
+)
+
+EXPECTED_FW_MARKERS = (
+    "[spi-loader-main] start safe one-shot ESP loader + pure SPI scanner",
+    "[spi-loader-main] KSD loader window",
+)
+
+
+class RtosSpiKsdClient(KsdAutoClient):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.seen_loader_marker = False
+
+    def read_line_once(self, *args, **kwargs) -> str | None:
+        line = super().read_line_once(*args, **kwargs)
+        if not line:
+            return line
+        if any(m in line for m in EXPECTED_FW_MARKERS):
+            self.seen_loader_marker = True
+        if any(m in line for m in WRONG_FW_MARKERS):
+            raise SystemExit(
+                "Wrong K210 firmware is running: saw old pin-test/Arduino SPI scanner logs. "
+                "The K210 diagnostic-loader was not flashed successfully. Re-run after a clean K210 flash."
+            )
+        return line
+
+    def connect(self) -> None:
+        try:
+            super().connect()
+        except TimeoutError as exc:
+            raise SystemExit(
+                "KSD handshake timeout. Most likely the K210 diagnostic-loader is not running. "
+                "Check the K210 flash step above; it must print the [spi-loader-main] marker."
+            ) from exc
+
+
 def wait_flash_result(client: KsdAutoClient) -> None:
     client.command_prompt()
     logging.info("sd-uart FLASH_ESP")
@@ -63,7 +103,7 @@ def monitor_spi_verdict(client: KsdAutoClient) -> None:
 
 
 def upload_and_run(args: argparse.Namespace, parts: list[base.FlashPart]) -> None:
-    client = KsdAutoClient(args.sd_uart, args.sd_baud, args.auto_reset, args.connect_timeout)
+    client = RtosSpiKsdClient(args.sd_uart, args.sd_baud, args.auto_reset, args.connect_timeout)
     try:
         client.connect()
         existing = client.get_file("flash.json")
