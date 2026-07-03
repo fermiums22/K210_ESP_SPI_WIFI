@@ -6,6 +6,7 @@ PROJ="/d/w_space/K210_ESP_SPI_WIFI/esp8266_rtos_clean/hello_uart"
 TOOLCHAIN_BIN="/d/w_space/esp8266_sdk/xtensa-lx106-elf/bin"
 SETUP_SCRIPT="/d/w_space/K210_ESP_SPI_WIFI/tools/esp8266_rtos_msys_setup.sh"
 PY_SHIMS="/d/w_space/K210_ESP_SPI_WIFI/tools/python_shims"
+PY_VENV_BIN="/d/w_space/K210_ESP_SPI_WIFI/.local-tools/esp8266_py/bin"
 
 ensure_toolchain_cmd()
 {
@@ -30,6 +31,7 @@ echo "PWD : $(pwd)"
 echo
 
 bash "$SETUP_SCRIPT"
+export PATH="$PY_VENV_BIN:$PATH"
 ensure_toolchain_cmd
 
 export IDF_PATH="$SDK"
@@ -40,10 +42,11 @@ python --version
 make --version | head -n 1
 xtensa-lx106-elf-gcc --version | head -n 1
 python - <<'PY'
+import pyparsing
 import pkg_resources
 pkg_resources.require('setuptools')
 import serial.tools.list_ports
-print('python shim smoke test OK')
+print('python venv/shim smoke test OK')
 PY
 
 # The v3.4 SDK has an obsolete nested tinydtls URL under the optional CoAP module.
