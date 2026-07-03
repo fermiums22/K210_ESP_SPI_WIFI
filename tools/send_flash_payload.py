@@ -372,6 +372,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--auto-reset", choices=("dan", "rts", "dtr", "both", "none"), default="none")
     ap.add_argument("--connect-timeout", type=float, default=20.0)
     ap.add_argument("--no-build", action="store_true", help="Do not run PlatformIO before preparing payload")
+    ap.add_argument("--dry-run", action="store_true", help="Build and prepare payload only; do not upload")
     return ap.parse_args()
 
 
@@ -391,7 +392,9 @@ def main() -> int:
     paths = write_payload(parts, cfg)
     logging.info("payload prepared: %s", OUT_DIR)
 
-    if args.sd_uart:
+    if args.dry_run:
+        logging.info("dry-run requested: payload prepared only, no upload")
+    elif args.sd_uart:
         import send_flash_payload_auto  # noqa: E402
         send_flash_payload_auto.upload_via_ksd(args, parts)
     elif args.host:
