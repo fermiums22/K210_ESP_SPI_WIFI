@@ -7,9 +7,7 @@ Preferred flow:
   PC script -> K210 RESET command
   K210 boot -> sees flash.json -> disarms it -> flashes ESP8285 -> logs result
 
-Legacy flow is still available:
-  PC -> TCP PUT files to ESP8285 bridge on port 7777
-  ESP8285 -> SPI frames to K210 -> SD card
+The KSD UART path uses manual waiting for explicit K210 protocol responses.
 """
 from __future__ import annotations
 
@@ -198,7 +196,13 @@ def write_payload(parts: list[FlashPart], flash_config: dict | None = None) -> l
         dst = OUT_DIR / part.remote_name
         shutil.copyfile(part.source, dst)
         copied.append(dst)
-        logging.info("payload: %s -> %s @ 0x%08X (%d bytes)", part.source, part.remote_name, part.offset, dst.stat().st_size)
+        logging.info(
+            "payload: %s -> %s @ 0x%08X (%d bytes)",
+            part.source,
+            part.remote_name,
+            part.offset,
+            dst.stat().st_size,
+        )
 
     cfg = OUT_DIR / "flash.json"
     data = flash_config if flash_config is not None else default_flash_config(parts)
@@ -206,6 +210,14 @@ def write_payload(parts: list[FlashPart], flash_config: dict | None = None) -> l
     copied.append(cfg)
     logging.info("payload: generated %s", cfg)
     return copied
+
+
+def confirm_step(message: str, assume_yes: bool) -> None:
+    if assume_yes:
+        logging.info("confirmed automatically: %s", message)
+        return
+    print()
+    input(f"{message}\nPress Enter to continue...")
 
 
 def recv_line(sock: socket.socket, timeout_s: float) -> str:
@@ -255,13 +267,12 @@ def upload_payload_tcp(host: str, port: int, files: list[Path], timeout_s: float
 
 
 class KsdClient:
-    def __init__(self, port: str, baud: int, timeout: float = 0.2):
+    def __init__(self, port: str, baud: int):
         try:
             import serial  # type: ignore
         except ImportError as exc:
             raise SystemExit("pyserial is not installed. Run: py -3 -m pip install -r requirements.txt") from exc
-        self.serial_mod = serial
-        self.ser = serial.Serial(port, baud, timeout=timeout)
+        self.ser = serial.Serial(port, baud, timeout=0.05)
         self.port = port
         self.baud = baud
 
@@ -272,72 +283,73 @@ class KsdClient:
         self.ser.write(data)
         self.ser.flush()
 
-    def read_ksd_line(self, timeout_s: float, prefixes: tuple[str, ...] | None = None) -> str:
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            raw = self.ser.readline()
-            if not raw:
-                continue
-            line = raw.decode("utf-8", errors="replace").rstrip()
-            if line:
-                logging.info("K210: %s", line)
-            if not line.startswith("KSD:"):
-                continue
-            if prefixes is None or line.startswith(prefixes):
-                return line
-        raise TimeoutError(f"Timeout waiting for KSD line {prefixes or ''}")
+    def read_line_once(self) -> str | None:
+        raw = self.ser.readline()
+        if not raw:
+            return None
+        line = raw.decode("utf-8", errors="replace").rstrip()
+        if line:
+            logging.info("K210: %s", line)
+        return line
 
-    def connect(self, timeout_s: float) -> None:
+    def wait_ksd_line(self, prefixes: tuple[str, ...], action: str) -> str:
+        logging.info("WAIT: %s", action)
+        while True:
+            line = self.read_line_once()
+            if not line or not line.startswith("KSD:"):
+                continue
+            if line.startswith(prefixes):
+                return line
+
+    def connect(self) -> None:
         logging.info("sd-uart: opening %s @ %d", self.port, self.baud)
-        logging.info("sd-uart: waiting up to %.0f seconds for K210 KSD boot window", timeout_s)
-        logging.info("ACTION: press RESET on K210 now if it is already showing the normal screen. Do NOT hold BOOT.")
-        deadline = time.monotonic() + timeout_s
+        logging.info("ACTION: press RESET on K210 now if it is already running the normal screen.")
+        logging.info("WAIT: KSD:READY or KSD:HELLO.")
         next_magic = 0.0
-        next_hint = 0.0
-        while time.monotonic() < deadline:
+        while True:
             now = time.monotonic()
-            if now >= next_hint:
-                remaining = max(0.0, deadline - now)
-                logging.info("sd-uart: waiting for KSD:READY/HELLO... %.0f s left", remaining)
-                next_hint = now + 3.0
             if now >= next_magic:
                 self.write(KSD_MAGIC)
                 next_magic = now + 0.25
-            try:
-                line = self.read_ksd_line(0.25, ("KSD:HELLO", "KSD:READY"))
-            except TimeoutError:
+
+            line = self.read_line_once()
+            if not line or not line.startswith("KSD:"):
                 continue
+
             if line.startswith("KSD:READY"):
                 logging.info("sd-uart: KSD:READY seen, sending HELLO magic")
                 self.write(KSD_MAGIC)
                 next_magic = time.monotonic() + 0.25
                 continue
+
             if line.startswith("KSD:HELLO"):
                 logging.info("sd-uart: connected")
                 return
-        raise SystemExit(
-            "K210 SD UART service did not answer. Check that COM port belongs to the K210 debug UART, "
-            "close any serial monitor, start upload first, then press RESET during the K210 boot window."
-        )
 
     def wait_cmd(self) -> None:
-        self.read_ksd_line(10.0, ("KSD:CMD",))
+        self.wait_ksd_line(("KSD:CMD",), "K210 command prompt")
+
+    def read_exact_loop(self, size: int) -> bytes:
+        data = bytearray()
+        while len(data) < size:
+            chunk = self.ser.read(size - len(data))
+            if chunk:
+                data.extend(chunk)
+        return bytes(data)
 
     def get_file(self, name: str) -> str | None:
         self.wait_cmd()
         logging.info("sd-uart GET %s", name)
         self.write(f"GET {name}\n".encode("ascii"))
-        line = self.read_ksd_line(10.0, ("KSD:SIZE", "KSD:MISSING", "KSD:ERR"))
+        line = self.wait_ksd_line(("KSD:SIZE", "KSD:MISSING", "KSD:ERR"), f"GET {name} response")
         if line.startswith("KSD:MISSING"):
             logging.info("sd-uart GET %s: missing", name)
             return None
         if line.startswith("KSD:ERR"):
             raise SystemExit(f"K210 GET failed: {line}")
         size = int(line.split()[1])
-        data = self.ser.read(size)
-        if len(data) != size:
-            raise SystemExit(f"K210 GET short read: {len(data)}/{size}")
-        ok = self.read_ksd_line(10.0, ("KSD:OK", "KSD:ERR"))
+        data = self.read_exact_loop(size)
+        ok = self.wait_ksd_line(("KSD:OK", "KSD:ERR"), f"GET {name} final ACK")
         if not ok.startswith("KSD:OK"):
             raise SystemExit(f"K210 GET failed after data: {ok}")
         text = data.decode("utf-8", errors="replace")
@@ -350,7 +362,7 @@ class KsdClient:
         self.wait_cmd()
         logging.info("sd-uart PUT %s (%d bytes)", remote_name, size)
         self.write(f"PUT {remote_name} {size}\n".encode("ascii"))
-        line = self.read_ksd_line(10.0, ("KSD:GO", "KSD:ERR"))
+        line = self.wait_ksd_line(("KSD:GO", "KSD:ERR"), f"PUT {remote_name} GO")
         if not line.startswith("KSD:GO"):
             raise SystemExit(f"K210 refused PUT {remote_name}: {line}")
 
@@ -362,49 +374,54 @@ class KsdClient:
                     break
                 self.write(chunk)
                 sent += len(chunk)
-                line = self.read_ksd_line(10.0, ("KSD:B", "KSD:ERR"))
+                line = self.wait_ksd_line(("KSD:B", "KSD:ERR"), f"PUT {remote_name} block ACK")
                 if line.startswith("KSD:ERR"):
                     raise SystemExit(f"K210 PUT failed at {sent}/{size}: {line}")
                 if sent == size or sent % 32768 == 0:
                     logging.info("sd-uart progress: %s %d/%d", remote_name, sent, size)
 
-        ok = self.read_ksd_line(20.0, ("KSD:OK", "KSD:ERR"))
+        ok = self.wait_ksd_line(("KSD:OK", "KSD:ERR"), f"PUT {remote_name} final ACK")
         if not ok.startswith("KSD:OK"):
             raise SystemExit(f"K210 PUT failed after data: {ok}")
         logging.info("sd-uart PUT done: %s", remote_name)
 
-    def reset_and_monitor(self, timeout_s: int) -> None:
+    def reset_and_monitor(self) -> None:
         self.wait_cmd()
         logging.info("sd-uart RESET")
         self.write(b"RESET\n")
-        self.read_ksd_line(10.0, ("KSD:RESETTING", "KSD:ERR"))
-        logging.info("K210 reset requested, monitoring flash log")
+        self.wait_ksd_line(("KSD:RESETTING", "KSD:ERR"), "RESET ACK")
+        logging.info("K210 reset requested, monitoring flash log in manual wait mode")
         stop_markers = ("ESP flash result: OK", "ESP flash result: FAIL", "[esp-flash] done", "[esp-flash] connect failed")
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            raw = self.ser.readline()
-            if not raw:
+        while True:
+            line = self.read_line_once()
+            if not line:
                 continue
-            line = raw.decode("utf-8", errors="replace").rstrip()
-            if line:
-                logging.info("K210: %s", line)
             if any(m in line for m in stop_markers):
                 logging.info("sd-uart monitor: stop marker found")
                 return
-        logging.info("sd-uart monitor: timeout")
 
 
-def upload_payload_sd_uart(port: str, baud: int, parts: list[FlashPart], timeout_s: float, monitor_timeout: int) -> None:
+def upload_payload_sd_uart(port: str, baud: int, parts: list[FlashPart], assume_yes: bool) -> None:
     client = KsdClient(port, baud)
     try:
-        client.connect(timeout_s)
+        client.connect()
         existing = client.get_file("flash.json")
         cfg = patch_flash_config(existing, parts)
         files = write_payload(parts, cfg)
         ordered = [p for p in files if p.name != "flash.json"] + [p for p in files if p.name == "flash.json"]
+
+        logging.info("planned SD writes:")
+        for path in ordered:
+            logging.info("  PUT %s (%d bytes)", path.name, path.stat().st_size)
+        logging.info("new flash_once section:")
+        logging.info(json.dumps(cfg.get("flash_once", {}), indent=2))
+
+        confirm_step("K210 is connected and flash.json is prepared. Confirm SD write.", assume_yes)
         for path in ordered:
             client.put_file(path, path.name)
-        client.reset_and_monitor(monitor_timeout)
+
+        confirm_step("Files are on SD. Confirm K210 reset to start ESP flash_once.", assume_yes)
+        client.reset_and_monitor()
     finally:
         client.close()
 
@@ -413,6 +430,7 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Build and send ESP8285 firmware to K210")
     ap.add_argument("--host", help="Legacy ESP bridge IP, visible as 'kesp: ip=...'")
     ap.add_argument("--port", type=int, default=DEFAULT_TCP_PORT, help="Legacy TCP bridge port, default 7777")
+    ap.add_argument("--tcp-timeout", type=float, default=45.0, help="Legacy TCP socket timeout seconds")
     ap.add_argument("--sd-uart", help="Preferred mode: K210 debug UART COM port, e.g. COM7")
     ap.add_argument("--sd-baud", type=int, default=115200, help="K210 debug UART baud, default 115200")
     ap.add_argument("--env", default="esp8285", help="PlatformIO environment, default esp8285")
@@ -423,33 +441,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--offset", default="0x0", help="Flash offset for --firmware, default 0x0")
     ap.add_argument("--full-flash", action="store_true", help="Use generated 1 MB merged image instead of default firmware.bin")
     ap.add_argument("--dry-run", action="store_true", help="Build/prepare only, do not send")
-    ap.add_argument("--timeout", type=float, default=120.0, help="Connect/transfer timeout seconds")
-    ap.add_argument("--monitor", help="Legacy: after TCP upload, monitor K210 serial COM port")
-    ap.add_argument("--monitor-baud", type=int, default=115200)
-    ap.add_argument("--monitor-timeout", type=int, default=180)
+    ap.add_argument("--yes", action="store_true", help="Do not ask for interactive confirmations")
     return ap.parse_args()
-
-
-def monitor_serial(port: str, baud: int, timeout_s: int) -> None:
-    try:
-        import serial  # type: ignore
-    except ImportError as exc:
-        raise SystemExit("pyserial is not installed. Run: py -3 -m pip install -r requirements.txt") from exc
-
-    logging.info("serial monitor: %s @ %d", port, baud)
-    stop_markers = ("ESP flash result: OK", "ESP flash result: FAIL", "[esp-flash] done", "[esp-flash] connect failed")
-    deadline = time.monotonic() + timeout_s
-    with serial.Serial(port, baud, timeout=0.2) as ser:
-        while time.monotonic() < deadline:
-            raw = ser.readline()
-            if not raw:
-                continue
-            line = raw.decode("utf-8", errors="replace").rstrip()
-            logging.info("K210: %s", line)
-            if any(m in line for m in stop_markers):
-                logging.info("serial monitor: stop marker found")
-                return
-    logging.info("serial monitor: timeout")
 
 
 def main() -> int:
@@ -466,7 +459,7 @@ def main() -> int:
     parts = collect_parts(args)
 
     if args.sd_uart:
-        upload_payload_sd_uart(args.sd_uart, args.sd_baud, parts, args.timeout, args.monitor_timeout)
+        upload_payload_sd_uart(args.sd_uart, args.sd_baud, parts, args.yes)
         logging.info("done. Send this log if flashing fails: %s", log_path)
         return 0
 
@@ -478,12 +471,7 @@ def main() -> int:
             logging.info("No --host or --sd-uart given. Use --sd-uart COMx for K210 SD upload.")
         return 0
 
-    upload_payload_tcp(args.host, args.port, payload_files, args.timeout)
-
-    if args.monitor:
-        input("Insert/reboot K210 now, then press Enter here to start serial log capture...")
-        monitor_serial(args.monitor, args.monitor_baud, args.monitor_timeout)
-
+    upload_payload_tcp(args.host, args.port, payload_files, args.tcp_timeout)
     logging.info("done. Send this log if flashing fails: %s", log_path)
     return 0
 
