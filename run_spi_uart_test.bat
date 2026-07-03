@@ -1,48 +1,10 @@
 @echo off
 setlocal EnableExtensions
 
-set "PORT=%~1"
-if "%PORT%"=="" set "PORT=COM12"
-set "ESP_DIR=%~dp0"
-set "K210_DIR=D:\w_space\K210_AI_V7s_Plus"
-
-echo === Pure UART/GPIO test ===
-echo ESP repo:  %ESP_DIR%
-echo K210 repo: %K210_DIR%
-echo Port:      %PORT%
-echo Flow:      checkout test branches, flash K210 once, build ESP, then use existing KSD only if app is alive.
+echo STOP: run_spi_uart_test.bat is disabled.
+echo Reason: the GPIO/SPI diagnostic branch can leave the K210 audio amplifier in a noisy state if the K210 app hangs.
 echo.
-
-if not exist "%K210_DIR%\.git" (
-  echo ERROR: K210 repo not found: %K210_DIR%
-  exit /b 2
-)
-
-cd /d "%K210_DIR%" || exit /b 2
-echo === K210: checkout spi-uart-test ===
-git fetch origin || exit /b 10
-git checkout spi-uart-test || exit /b 11
-git pull --ff-only origin spi-uart-test || exit /b 12
-
-echo === K210: build + flash GPIO tester ===
-call build_k210.bat || exit /b 20
-call flash_k210.bat %PORT% --no-build || exit /b 21
-
-cd /d "%ESP_DIR%" || exit /b 2
-echo === ESP: checkout spi-uart-test ===
-git fetch origin || exit /b 30
-git checkout spi-uart-test || exit /b 31
-git pull --ff-only origin spi-uart-test || exit /b 32
-
-echo === ESP: build GPIO tester ===
-call build_esp_payload.bat || exit /b 40
-
-echo === ESP: upload/flash through existing K210 KSD, no extra reset ===
-echo If this fails with KSD timeout, K210 app did not start after kflash; do not rerun this loop, reset K210 once and run upload_esp_payload_uart.bat COM12.
-call upload_esp_payload_uart.bat %PORT% || exit /b 41
-
-echo === Monitor GPIO link test ===
-echo Watch for: kesp-gpio-test RESULT and [gpio-test] RESULT.
+echo Recovery command:
+echo cd /d D:\w_space\K210_AI_V7s_Plus ^&^& git checkout main ^&^& git pull ^&^& build_k210.bat ^&^& flash_k210.bat COM12 --no-build
 echo.
-call monitor_k210.bat %PORT%
-exit /b %ERRORLEVEL%
+exit /b 99
