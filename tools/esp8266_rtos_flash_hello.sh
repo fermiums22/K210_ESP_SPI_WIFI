@@ -11,6 +11,7 @@ ESPPORT="$1"
 ESPBAUD="${2:-460800}"
 SDK="/d/w_space/esp8266_sdk/ESP8266_RTOS_SDK"
 PROJ="/d/w_space/K210_ESP_SPI_WIFI/esp8266_rtos_clean/hello_uart"
+TOOLCHAIN_BIN="/d/w_space/esp8266_sdk/xtensa-lx106-elf/bin"
 
 ensure_python_cmd()
 {
@@ -38,11 +39,34 @@ ensure_python_cmd()
     exit 2
 }
 
+ensure_toolchain_cmd()
+{
+    export PATH="$TOOLCHAIN_BIN:$PATH"
+
+    if command -v xtensa-lx106-elf-gcc >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "ERROR: xtensa-lx106-elf-gcc not found."
+    echo "Expected toolchain bin: $TOOLCHAIN_BIN"
+    exit 3
+}
+
 cd "$SDK"
 ensure_python_cmd
+ensure_toolchain_cmd
 
-./install.sh
-. ./export.sh
+export IDF_PATH="$SDK"
+export IDF_PYTHON_ENV_PATH=""
+
+if [ -f "$SDK/requirements.txt" ]; then
+    if ! python -m pip --version >/dev/null 2>&1; then
+        pacman -S --needed --noconfirm python-pip || true
+    fi
+    if python -m pip --version >/dev/null 2>&1; then
+        python -m pip install --user -r "$SDK/requirements.txt"
+    fi
+fi
 
 cd "$PROJ"
 make defconfig
