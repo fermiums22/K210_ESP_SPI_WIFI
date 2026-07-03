@@ -20,6 +20,10 @@ if str(TOOLS_DIR) not in sys.path:
 
 import send_flash_payload as base  # noqa: E402
 
+# Must match K210_AI_V7s_Plus/src/sd_uart.c UART_SD_BUF.
+# 512-byte bursts were not stable on this UARTHS+SD path and could stop around 128 KiB.
+KSD_UPLOAD_CHUNK = 128
+
 
 class KsdAutoClient:
     def __init__(self, port: str, baud: int, reset_mode: str):
@@ -160,7 +164,7 @@ class KsdAutoClient:
     def put_file(self, path: Path, remote_name: str) -> None:
         size = path.stat().st_size
         self.command_prompt()
-        logging.info("sd-uart PUT %s (%d bytes)", remote_name, size)
+        logging.info("sd-uart PUT %s (%d bytes, chunk=%d)", remote_name, size, KSD_UPLOAD_CHUNK)
         self.write_command(f"PUT {remote_name} {size}\n")
         line = self.stage_line(("KSD:GO", "KSD:ERR"), f"PUT {remote_name} GO")
         if not line.startswith("KSD:GO"):
@@ -172,7 +176,7 @@ class KsdAutoClient:
         sent = 0
         with path.open("rb") as f:
             while sent < size:
-                chunk = f.read(base.KSD_CHUNK)
+                chunk = f.read(KSD_UPLOAD_CHUNK)
                 if not chunk:
                     break
                 self.write_payload_block(chunk)
