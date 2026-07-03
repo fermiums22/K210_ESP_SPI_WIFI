@@ -11,6 +11,14 @@
 #define KESP_VERSION "rtos-spi-test"
 #endif
 
+#ifndef pdMS_TO_TICKS
+#if defined(portTICK_PERIOD_MS)
+#define pdMS_TO_TICKS(ms) ((ms) / portTICK_PERIOD_MS)
+#else
+#define pdMS_TO_TICKS(ms) ((ms) / portTICK_RATE_MS)
+#endif
+#endif
+
 #define SPI_FRAME_BYTES     32u
 #define SPI_FRAME_WORDS     16u  /* ESP8266 SPI slave FIFO is 16 x 32-bit = 64 bytes. */
 
