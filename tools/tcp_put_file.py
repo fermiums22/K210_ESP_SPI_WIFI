@@ -8,6 +8,9 @@ import time
 from pathlib import Path
 
 
+SEND_CHUNK = 16384
+
+
 def recv_line(sock: socket.socket, timeout_s: float) -> str:
     sock.settimeout(timeout_s)
     data = bytearray()
@@ -23,25 +26,37 @@ def recv_line(sock: socket.socket, timeout_s: float) -> str:
 
 def put_file(host: str, port: int, path: Path, remote_name: str, timeout_s: float) -> None:
     size = path.stat().st_size
-    print(f"TCP PUT {path} -> {host}:{port}/{remote_name} ({size} bytes)")
+    print(f"TCP PUT {path} -> {host}:{port}/{remote_name} ({size} bytes) [Python]")
     start = time.monotonic()
-    with socket.create_connection((host, port), timeout=timeout_s) as sock:
+    try:
+        sock_cm = socket.create_connection((host, port), timeout=timeout_s)
+    except PermissionError as exc:
+        print("ERROR: Windows blocked Python TCP connect (WinError 10013).", file=sys.stderr)
+        print("This is a local Windows firewall/security policy issue; ESP did not receive the PUT.", file=sys.stderr)
+        print("wifi_put_file.bat will try the PowerShell/.NET fallback uploader next.", file=sys.stderr)
+        raise SystemExit(10013) from exc
+    except OSError as exc:
+        print(f"ERROR: TCP connect to {host}:{port} failed: {exc}", file=sys.stderr)
+        raise
+
+    with sock_cm as sock:
         sock.settimeout(timeout_s)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.sendall(f"PUT {remote_name} {size}\n".encode("ascii"))
         sent = 0
         with path.open("rb") as f:
             while True:
-                chunk = f.read(4096)
+                chunk = f.read(SEND_CHUNK)
                 if not chunk:
                     break
                 sock.sendall(chunk)
                 sent += len(chunk)
                 if sent == size or sent % 32768 == 0:
-                    print(f"progress {sent}/{size}")
+                    elapsed = max(time.monotonic() - start, 0.001)
+                    print(f"progress {sent}/{size} {sent / 1024.0 / elapsed:.1f} KiB/s")
         response = recv_line(sock, timeout_s)
     elapsed = time.monotonic() - start
-    print(f"response: {response or '<empty>'} ({elapsed:.1f}s)")
+    print(f"response: {response or '<empty>'} ({elapsed:.1f}s, {size / 1024.0 / max(elapsed, 0.001):.1f} KiB/s)")
     if not response.startswith("OK"):
         raise SystemExit(1)
 
