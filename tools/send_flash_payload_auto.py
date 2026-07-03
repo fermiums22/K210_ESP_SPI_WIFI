@@ -121,6 +121,10 @@ class KsdAutoClient:
 
     def command_prompt(self) -> None:
         self.stage_line(("KSD:CMD",), "K210 command prompt")
+        # Give K210 a tiny guard time to leave TX logging and enter raw RX polling.
+        # This is not a manual workaround: it makes the line-oriented protocol
+        # tolerant to UART adapter/driver buffering around the shared debug port.
+        time.sleep(0.05)
 
     def read_exact_loop(self, size: int) -> bytes:
         data = bytearray()
