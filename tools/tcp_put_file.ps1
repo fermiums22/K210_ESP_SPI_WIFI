@@ -19,7 +19,7 @@ $fileInfo = Get-Item -LiteralPath $LocalFile
 $size = [int64]$fileInfo.Length
 Write-Host "TCP PUT $LocalFile -> ${HostName}:$Port/$RemoteName ($size bytes) [PowerShell/.NET]"
 
-$client = [System.Net.Sockets.TcpClient]::new()
+$client = New-Object System.Net.Sockets.TcpClient
 $iar = $client.BeginConnect($HostName, $Port, $null, $null)
 if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs)) {
     $client.Close()
@@ -36,7 +36,8 @@ $header = [System.Text.Encoding]::ASCII.GetBytes("PUT $RemoteName $size`n")
 $stream.Write($header, 0, $header.Length)
 
 $buf = New-Object byte[] 16384
-$fs = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $LocalFile))
+$fullPath = (Resolve-Path -LiteralPath $LocalFile).Path
+$fs = [System.IO.File]::OpenRead($fullPath)
 $sent = 0L
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 try {
@@ -44,7 +45,8 @@ try {
         $stream.Write($buf, 0, $n)
         $sent += $n
         if (($sent -eq $size) -or (($sent % 32768) -eq 0)) {
-            $kbps = ($sent / 1024.0) / [Math]::Max($sw.Elapsed.TotalSeconds, 0.001)
+            $seconds = [Math]::Max($sw.Elapsed.TotalSeconds, 0.001)
+            $kbps = ($sent / 1024.0) / $seconds
             Write-Host ("progress {0}/{1} {2:N1} KiB/s" -f $sent, $size, $kbps)
         }
     }
@@ -62,7 +64,13 @@ while ($true) {
 }
 $response = [System.Text.Encoding]::UTF8.GetString($responseBytes.ToArray())
 $elapsed = [Math]::Max($sw.Elapsed.TotalSeconds, 0.001)
-Write-Host ("response: {0} ({1:N1}s, {2:N1} KiB/s)" -f ($(if ($response) { $response } else { '<empty>' }), $elapsed, (($size / 1024.0) / $elapsed))
+if ([string]::IsNullOrEmpty($response)) {
+    $responseText = '<empty>'
+} else {
+    $responseText = $response
+}
+$totalKbps = ($size / 1024.0) / $elapsed
+Write-Host ("response: {0} ({1:N1}s, {2:N1} KiB/s)" -f $responseText, $elapsed, $totalKbps)
 
 $stream.Close()
 $client.Close()
