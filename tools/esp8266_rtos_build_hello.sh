@@ -52,12 +52,23 @@ PY
 # The v3.4 SDK has an obsolete nested tinydtls URL under the optional CoAP module.
 # hello_uart does not use CoAP, so do not block bring-up on that nested submodule.
 # Keep already downloaded useful submodules, but avoid recursive repair here.
-git submodule update --init components/json/cJSON components/lwip/lwip components/mbedtls/mbedtls components/mqtt/esp-mqtt || true
+for d in components/json/cJSON components/lwip/lwip components/mbedtls/mbedtls components/mqtt/esp-mqtt; do
+    if [ ! -e "$SDK/$d" ] || [ -z "$(ls -A "$SDK/$d" 2>/dev/null || true)" ]; then
+        git submodule update --init "$d" || true
+    fi
+done
 
-echo "Building hello_uart with limited COMPONENTS..."
+echo "Building hello_uart incrementally..."
 cd "$PROJ"
-rm -rf build
-make defconfig
+if [ "${ESP8266_RTOS_FORCE_REBUILD:-0}" = "1" ]; then
+    echo "ESP8266_RTOS_FORCE_REBUILD=1 -> removing build directory and sdkconfig"
+    rm -rf build sdkconfig
+fi
+
+if [ ! -f sdkconfig ]; then
+    make defconfig
+fi
+
 make -j"${NUMBER_OF_PROCESSORS:-4}"
 
 echo
