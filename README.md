@@ -170,6 +170,7 @@ cd /d D:\w_space\K210_ESP_SPI_WIFI && call run_pc_wifi_spi_sd_full_test.bat COM1
 
 | Failure | Meaning / next action |
 |---|---|
+| `KSD:SD_FAIL rw` with `sdcard init rc=255 capacity=0 block=0` | SD driver returned a bad card state immediately after fresh K210 reboot. Update `K210_AI_V7s_Plus/main`; `sd.c` now drops the bad handle and reinitializes SD/SPI/GPIO before declaring failure. |
 | `GET size: KSD:MISSING` immediately after KSD `PUT OK` | KSD PUT/GET must use direct FatFs, not VFS. Run the full command with the latest `apply_fast_io_tuning.py`; expected line includes `ksd_io=fatfs`. |
 | `FLASH_ESP monitor: no line from K210` | Old PC monitor timeout. Update `K210_ESP_SPI_WIFI/main`; current scripts use blocking serial reads after KSD connect. |
 | `write failed at part ...` during ESP flashing | ESP serial flashing link failed mid-transfer. Use fast tuning first: `--esp-baud 230400 --esp-block 4096`. If it still fails, test a lower baud but keep block 4096. |
