@@ -3,245 +3,246 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import logging
+import re
 import socket
-import time
+import sys
+from datetime import datetime
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+LOG_DIR = ROOT / "logs"
 KSD_MAGIC = b"KSD1\n"
-DEFAULT_KSD_BAUD = 921600
-DEFAULT_TCP_PORT = 18080
-DEFAULT_SIZE = 1024 * 1024
-TCP_CHUNK = 16 * 1024
+DEFAULT_REMOTE_NAME = "pc_wifi_spi_sd.bin"
 
 
-def make_test_file(path: Path, size: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.stat().st_size == size:
-        return
-    with path.open("wb") as f:
-        pos = 0
-        while pos < size:
-            n = min(65536, size - pos)
-            data = bytes(((pos + i) * 37 + ((pos + i) >> 8)) & 0xFF for i in range(n))
-            f.write(data)
-            pos += n
+def setup_logging() -> Path:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / f"pc_wifi_spi_sd_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(log_path, encoding="utf-8")],
+    )
+    return log_path
 
 
-def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def make_payload(size: int) -> bytes:
+    seed = b"K210-ESP8285-PC-WIFI-SPI-SD\n"
+    out = bytearray()
+    counter = 0
+    while len(out) < size:
+        h = hashlib.sha256(seed + counter.to_bytes(4, "little")).digest()
+        out.extend(h)
+        counter += 1
+    return bytes(out[:size])
 
 
-def tcp_put(host: str, port: int, local: Path, remote: str, timeout: float) -> float:
-    size = local.stat().st_size
-    print(f"TCP PUT: {local} -> {host}:{port}/{remote} ({size} bytes)")
-    start = time.monotonic()
-    with socket.create_connection((host, port), timeout=timeout) as sock:
-        sock.settimeout(timeout)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sock.sendall(f"PUT {remote} {size}\n".encode("ascii"))
-        sent = 0
-        with local.open("rb") as f:
-            while True:
-                chunk = f.read(TCP_CHUNK)
-                if not chunk:
-                    break
-                sock.sendall(chunk)
-                sent += len(chunk)
-                if sent == size or sent % (256 * 1024) == 0:
-                    dt = max(time.monotonic() - start, 0.001)
-                    print(f"TCP progress: {sent}/{size} {sent / 1024.0 / dt:.1f} KiB/s")
-        line = bytearray()
-        while True:
-            b = sock.recv(1)
-            if not b or b == b"\n":
-                break
-            if b != b"\r":
-                line += b
-    elapsed = max(time.monotonic() - start, 0.001)
-    response = line.decode("utf-8", errors="replace")
-    print(f"TCP response: {response or '<empty>'} ({elapsed:.2f}s, {size / 1024.0 / elapsed:.1f} KiB/s)")
-    if not response.startswith("OK"):
-        raise SystemExit(f"TCP PUT failed: {response}")
-    return elapsed
+class LineGuard:
+    def __init__(self, max_lines: int, stage: str):
+        self.max_lines = max_lines
+        self.stage = stage
+        self.count = 0
+
+    def tick(self) -> None:
+        self.count += 1
+        if self.count > self.max_lines:
+            raise SystemExit(f"{self.stage}: line guard exceeded ({self.max_lines}); no automatic retry")
 
 
-class KsdClient:
-    def __init__(self, port: str, baud: int, timeout: float):
+class Ksd:
+    def __init__(self, port: str, baud: int, max_lines: int):
         try:
             import serial  # type: ignore
         except ImportError as exc:
-            raise SystemExit("pyserial is not installed. Run: py -3 -m pip install -r requirements.txt") from exc
-        self.ser = serial.Serial(port, baud, timeout=0.05)
-        self.port = port
-        self.baud = baud
-        self.timeout = timeout
+            raise SystemExit("pyserial is missing; install requirements.txt") from exc
+        self.ser = serial.Serial(port, baud, timeout=None, write_timeout=None)
+        self.ser.dtr = False
+        self.ser.rts = False
+        self.max_lines = max_lines
+        self.have_prompt = False
 
     def close(self) -> None:
         self.ser.close()
 
-    def read_line_once(self) -> str | None:
+    def line(self, stage: str) -> str:
         raw = self.ser.readline()
-        if not raw:
-            return None
-        return raw.decode("utf-8", errors="replace").rstrip()
-
-    def wait_ksd(self, prefixes: tuple[str, ...], stage: str, timeout: float | None = None) -> str:
-        deadline = time.monotonic() + (timeout or self.timeout)
-        while time.monotonic() < deadline:
-            line = self.read_line_once()
-            if not line:
-                continue
-            if line.startswith("KSD:"):
-                print(f"KSD: {line}")
-                if line.startswith(prefixes):
-                    return line
-            else:
-                print(f"K210: {line}")
-        raise TimeoutError(stage)
+        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+        logging.info("K210: %s", line)
+        return line
 
     def connect(self) -> None:
-        print(f"KSD connect: {self.port} @ {self.baud}")
-        deadline = time.monotonic() + self.timeout
-        next_magic = 0.0
-        while time.monotonic() < deadline:
-            now = time.monotonic()
-            if now >= next_magic:
-                self.ser.write(KSD_MAGIC)
-                self.ser.flush()
-                next_magic = now + 0.25
-            line = self.read_line_once()
-            if not line:
-                continue
-            if line.startswith("KSD:"):
-                print(f"KSD: {line}")
-                if line.startswith("KSD:READY"):
-                    self.ser.write(KSD_MAGIC)
-                    self.ser.flush()
-                if line.startswith("KSD:HELLO"):
-                    print("KSD connected")
-                    return
-            else:
-                print(f"K210: {line}")
-        raise TimeoutError("KSD handshake timeout")
-
-    def command_prompt(self) -> None:
-        self.wait_ksd(("KSD:CMD",), "KSD command prompt")
-
-    def run_spi(self) -> None:
-        self.command_prompt()
-        print("KSD RUN_SPI")
-        self.ser.write(b"RUN_SPI\n")
+        logging.info("KSD connect: send one magic, then wait for HELLO/CMD")
+        self.ser.write(KSD_MAGIC)
         self.ser.flush()
-        self.wait_ksd(("KSD:RUNSPI", "KSD:ERR"), "RUN_SPI")
+        guard = LineGuard(self.max_lines, "connect")
+        while True:
+            guard.tick()
+            line = self.line("connect")
+            if line.startswith("KSD:ERR"):
+                raise SystemExit(f"connect: {line}")
+            if line.startswith("KSD:HELLO"):
+                return
+            if line.startswith("KSD:CMD"):
+                self.have_prompt = True
+                return
 
-    def get_file(self, remote: str, dst: Path) -> float:
-        self.command_prompt()
-        print(f"KSD GET: {remote}")
-        self.ser.write(f"GET {remote}\n".encode("ascii"))
+    def wait_prompt(self, stage: str) -> None:
+        if self.have_prompt:
+            self.have_prompt = False
+            return
+        guard = LineGuard(self.max_lines, stage)
+        while True:
+            guard.tick()
+            line = self.line(stage)
+            if line.startswith("KSD:ERR"):
+                raise SystemExit(f"{stage}: {line}")
+            if line.startswith("KSD:CMD"):
+                return
+
+    def send_command(self, cmd: str, stage: str) -> None:
+        self.wait_prompt(stage + " prompt")
+        logging.info("KSD > %s", cmd)
+        self.ser.write((cmd + "\n").encode("ascii"))
         self.ser.flush()
-        line = self.wait_ksd(("KSD:SIZE", "KSD:MISSING", "KSD:ERR"), f"GET {remote} size", timeout=10.0)
-        if line.startswith("KSD:MISSING"):
-            raise SystemExit(f"KSD GET failed: {remote} is missing on SD")
-        if line.startswith("KSD:ERR"):
-            raise SystemExit(f"KSD GET failed: {line}")
-        size = int(line.split()[1])
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        start = time.monotonic()
-        got = 0
-        with dst.open("wb") as f:
-            while got < size:
-                chunk = self.ser.read(min(4096, size - got))
-                if not chunk:
-                    if time.monotonic() - start > self.timeout:
-                        raise TimeoutError(f"KSD raw read timeout at {got}/{size}")
-                    continue
-                f.write(chunk)
-                got += len(chunk)
-                if got == size or got % (256 * 1024) == 0:
-                    dt = max(time.monotonic() - start, 0.001)
-                    print(f"KSD GET progress: {got}/{size} {got / 1024.0 / dt:.1f} KiB/s")
-        self.wait_ksd(("KSD:OK", "KSD:ERR"), f"GET {remote} final", timeout=10.0)
-        elapsed = max(time.monotonic() - start, 0.001)
-        print(f"KSD GET done: {dst} ({elapsed:.2f}s, {size / 1024.0 / elapsed:.1f} KiB/s)")
-        return elapsed
 
-    def done(self) -> None:
-        self.command_prompt()
-        self.ser.write(b"DONE\n")
-        self.ser.flush()
-        self.wait_ksd(("KSD:DONE",), "DONE")
+    def start_run_spi_and_wait_ready(self) -> tuple[str, int]:
+        self.send_command("RUN_SPI", "RUN_SPI")
+        guard = LineGuard(self.max_lines, "RUN_SPI readiness")
+        ip = ""
+        fallback_ip = ""
+        port = 18080
+        tcp_ready = False
+        spi_ok = False
+        while True:
+            guard.tick()
+            line = self.line("RUN_SPI readiness")
+            if line.startswith("KSD:CMD"):
+                self.have_prompt = True
+            if line.startswith("KSD:ERR"):
+                raise SystemExit(f"RUN_SPI: {line}")
+            m = re.search(r"kesp: wifi connected ip=([0-9.]+)", line)
+            if m:
+                ip = m.group(1)
+                logging.info("ESP STA IP detected: %s", ip)
+            m = re.search(r"fallback AP .*ip=([0-9.]+)", line)
+            if m:
+                fallback_ip = m.group(1)
+                logging.info("ESP fallback AP IP detected: %s", fallback_ip)
+            m = re.search(r"kesp: tcp server ready port=(\d+)", line)
+            if m:
+                port = int(m.group(1))
+                tcp_ready = True
+            if "[wifi-sd] VERDICT SPI_OK" in line:
+                spi_ok = True
+            if "[wifi-sd] VERDICT SPI_FAIL" in line:
+                raise SystemExit("RUN_SPI: K210 did not find KESP SPI frame")
+            if tcp_ready and spi_ok and (ip or fallback_ip):
+                return (ip or fallback_ip, port)
+
+    def wait_wifi_sd_ok(self, remote_rel: str) -> None:
+        guard = LineGuard(self.max_lines, "WIFI_SD_OK")
+        token = f"WIFI_SD_OK {remote_rel}"
+        while True:
+            guard.tick()
+            line = self.line("WIFI_SD_OK")
+            if line.startswith("KSD:CMD"):
+                self.have_prompt = True
+            if "WIFI_SD_FAIL" in line or "DATA offset mismatch" in line or "BEGIN sd_mount failed" in line:
+                raise SystemExit(f"WiFi->SPI->SD failed: {line}")
+            if token in line:
+                logging.info("matched %s", token)
+                return
+
+    def get_file(self, rel_path: str) -> bytes:
+        self.send_command(f"GET {rel_path}", "GET")
+        guard = LineGuard(self.max_lines, "GET size")
+        size = None
+        while size is None:
+            guard.tick()
+            line = self.line("GET size")
+            if line.startswith("KSD:MISSING") or line.startswith("KSD:ERR"):
+                raise SystemExit(f"GET {rel_path}: {line}")
+            if line.startswith("KSD:SIZE "):
+                size = int(line.split()[1])
+        data = self.ser.read(size)
+        if len(data) != size:
+            raise SystemExit(f"GET {rel_path}: short binary read {len(data)}/{size}")
+        guard = LineGuard(self.max_lines, "GET final")
+        while True:
+            guard.tick()
+            line = self.line("GET final")
+            if line.startswith("KSD:OK"):
+                return data
+            if line.startswith("KSD:ERR"):
+                raise SystemExit(f"GET {rel_path}: {line}")
 
 
-def ksd_run_spi_once(port: str, baud: int, timeout: float) -> None:
-    ksd = KsdClient(port, baud, timeout)
-    try:
-        ksd.connect()
-        ksd.run_spi()
-        ksd.done()
-    finally:
-        ksd.close()
-
-
-def ksd_get_verify(port: str, baud: int, timeout: float, remote: str, dst: Path) -> float:
-    ksd = KsdClient(port, baud, timeout)
-    try:
-        ksd.connect()
-        elapsed = ksd.get_file(remote, dst)
-        ksd.done()
-        return elapsed
-    finally:
-        ksd.close()
+def tcp_put(host: str, port: int, name: str, payload: bytes) -> str:
+    logging.info("TCP connect %s:%d", host, port)
+    with socket.create_connection((host, port)) as sock:
+        header = f"PUT {name} {len(payload)}\n".encode("ascii")
+        logging.info("TCP > %s", header.decode("ascii").rstrip())
+        sock.sendall(header)
+        sock.sendall(payload)
+        chunks = []
+        while True:
+            b = sock.recv(1024)
+            if not b:
+                break
+            chunks.append(b)
+    reply = b"".join(chunks).decode("utf-8", errors="replace").strip()
+    logging.info("TCP < %s", reply)
+    if not reply.startswith("OK"):
+        raise SystemExit(f"TCP PUT failed: {reply}")
+    return reply
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[1]
-    ap = argparse.ArgumentParser(description="PC -> WiFi -> ESP SPI -> K210 SD write, then KSD SD readback verify")
-    ap.add_argument("--host", default="192.168.0.132", help="ESP STA IP; fallback AP is usually 192.168.4.1")
-    ap.add_argument("--tcp-port", type=int, default=DEFAULT_TCP_PORT)
+    ap = argparse.ArgumentParser(description="One-pass PC -> WiFi -> ESP SPI -> K210 SD verifier; no automatic retries.")
     ap.add_argument("--sd-uart", default="COM12")
-    ap.add_argument("--sd-baud", type=int, default=DEFAULT_KSD_BAUD)
-    ap.add_argument("--size", type=int, default=DEFAULT_SIZE)
-    ap.add_argument("--remote", default="t1m.bin")
-    ap.add_argument("--timeout", type=float, default=45.0)
+    ap.add_argument("--sd-baud", type=int, default=921600)
+    ap.add_argument("--size", type=int, default=64 * 1024)
+    ap.add_argument("--name", default=DEFAULT_REMOTE_NAME)
+    ap.add_argument("--host", default="", help="Override ESP TCP host. Empty = parse ESP UART log.")
+    ap.add_argument("--port", type=int, default=0, help="Override ESP TCP port. 0 = parse ESP UART log/default 18080.")
+    ap.add_argument("--max-lines", type=int, default=4000, help="Line guard per stage; this is not a retry loop.")
     args = ap.parse_args()
 
-    out = root / "out" / "wifi_spi_sd_test"
-    local = out / f"test_{args.size}.bin"
-    readback = out / f"readback_{args.remote}"
+    if args.size <= 0:
+        raise SystemExit("--size must be positive")
+    if not re.match(r"^[A-Za-z0-9_.-]+$", args.name):
+        raise SystemExit("--name must contain only A-Z a-z 0-9 _ . -")
 
-    print("=== PC -> WiFi -> SPI -> SD fast RW test ===")
-    print(f"ESP host: {args.host}:{args.tcp_port}")
-    print(f"KSD UART: {args.sd_uart} @ {args.sd_baud}")
-    print(f"Remote SD name: {args.remote}")
-    print(f"Size: {args.size} bytes")
+    log_path = setup_logging()
+    logging.info("repo: %s", ROOT)
+    logging.info("log: %s", log_path)
+    logging.info("test payload size=%d name=%s", args.size, args.name)
 
-    make_test_file(local, args.size)
-    src_hash = sha256_file(local)
-    print(f"Local SHA256: {src_hash}")
+    payload = make_payload(args.size)
+    sha = hashlib.sha256(payload).hexdigest()
+    remote_rel = "wifi/" + args.name
 
-    print("Start K210 ESP UART/SPI receiver through KSD RUN_SPI...")
-    ksd_run_spi_once(args.sd_uart, args.sd_baud, args.timeout)
-    time.sleep(1.0)
+    ksd = Ksd(args.sd_uart, args.sd_baud, args.max_lines)
+    try:
+        ksd.connect()
+        host, port = ksd.start_run_spi_and_wait_ready()
+        if args.host:
+            host = args.host
+        if args.port:
+            port = args.port
+        tcp_put(host, port, args.name, payload)
+        ksd.wait_wifi_sd_ok(remote_rel)
+        got = ksd.get_file(remote_rel)
+    finally:
+        ksd.close()
 
-    tcp_s = tcp_put(args.host, args.tcp_port, local, args.remote, args.timeout)
-
-    print("Wait 2 seconds for K210 SD close/log flush...")
-    time.sleep(2.0)
-
-    get_s = ksd_get_verify(args.sd_uart, args.sd_baud, args.timeout, args.remote, readback)
-
-    rb_hash = sha256_file(readback)
-    print(f"Readback SHA256: {rb_hash}")
-    if rb_hash != src_hash:
-        raise SystemExit("VERIFY FAIL: SHA256 mismatch")
-
-    print("VERIFY OK: readback matches original")
-    print(f"WRITE TCP speed: {args.size / 1024.0 / max(tcp_s, 0.001):.1f} KiB/s")
-    print(f"READ KSD speed:  {args.size / 1024.0 / max(get_s, 0.001):.1f} KiB/s")
+    got_sha = hashlib.sha256(got).hexdigest()
+    if got != payload:
+        raise SystemExit(f"VERIFY_FAIL sha_tx={sha} sha_rx={got_sha} len_rx={len(got)}")
+    logging.info("PASS PC_WIFI_SPI_SD path=%s size=%d sha256=%s", remote_rel, len(got), sha)
+    print(f"PASS PC_WIFI_SPI_SD path={remote_rel} size={len(got)} sha256={sha}")
     return 0
 
 
