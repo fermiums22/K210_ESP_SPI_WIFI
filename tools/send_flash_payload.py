@@ -4,10 +4,8 @@ Build and send ESP8285 flash payload through K210.
 
 Preferred flow:
   PC script -> K210 debug UART KSD1 protocol -> SD card files + flash.json
-  PC script -> K210 RESET command
-  K210 boot -> sees flash.json -> disarms it -> flashes ESP8285 -> logs result
-
-The KSD UART path uses manual waiting for explicit K210 protocol responses.
+  PC script -> K210 FLASH_ESP command
+  K210 -> ESP serial flasher -> ESP normal boot/logs
 """
 from __future__ import annotations
 
@@ -30,13 +28,13 @@ LOG_DIR = ROOT / "logs"
 OUT_DIR = ROOT / "out" / "flash_payload"
 DEFAULT_TCP_PORT = 7777
 KSD_MAGIC = b"KSD1\n"
-KSD_CHUNK = 512
+KSD_CHUNK = 4096
 
-# Current K210 KSD raw PUT path can stall around the 128 KiB boundary on this
-# board/USB-UART/SD combination. K210 ESP flasher already supports up to 8
-# flash.json parts, so keep every UART-uploaded ESP payload file well below
-# that boundary and flash the same image back as sequential ESP flash parts.
-KSD_SAFE_FLASH_PART_BYTES = 0x10000  # 64 KiB, flash-sector aligned
+# Keep normal ESP images whole.  Splitting an ESP8266 app image into separately
+# flashed ranges made the bootloader hit `csum err` even though each individual
+# flasher transaction reported OK.  Only very large/full images are split, and
+# then on a large sector-aligned boundary.
+KSD_SAFE_FLASH_PART_BYTES = 0x40000  # 256 KiB, flash-sector aligned
 K210_MAX_ESP_FLASH_PARTS = 8
 
 
@@ -52,16 +50,13 @@ class FlashPart:
 def setup_logging() -> Path:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"flash_payload_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     root_logger.handlers.clear()
-
     fmt = logging.Formatter("%(asctime)s %(levelname)s: %(message)s", "%H:%M:%S")
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(fmt)
     root_logger.addHandler(console)
-
     file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setFormatter(fmt)
     root_logger.addHandler(file_handler)
@@ -70,15 +65,8 @@ def setup_logging() -> Path:
 
 def run(cmd: list[str], cwd: Path) -> None:
     logging.info("run: %s", " ".join(cmd))
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace")
     assert proc.stdout is not None
     for line in proc.stdout:
         logging.info(line.rstrip())
@@ -122,32 +110,23 @@ def split_large_part(part: FlashPart) -> list[FlashPart]:
     pos = 0
     while pos < total:
         chunk = min(KSD_SAFE_FLASH_PART_BYTES, total - pos)
-        chunks.append(
-            FlashPart(
-                source=part.source,
-                remote_name=f"esp_{part.offset + pos:06x}.bin",
-                offset=part.offset + pos,
-                source_offset=part.source_offset + pos,
-                size=chunk,
-            )
-        )
+        chunks.append(FlashPart(
+            source=part.source,
+            remote_name=f"esp_{part.offset + pos:06x}.bin",
+            offset=part.offset + pos,
+            source_offset=part.source_offset + pos,
+            size=chunk,
+        ))
         pos += chunk
 
     if len(chunks) > K210_MAX_ESP_FLASH_PARTS:
         raise SystemExit(
             f"Image {part.source} is {total} bytes and would need {len(chunks)} KSD-safe parts. "
-            f"Current K210 ESP flash config supports only {K210_MAX_ESP_FLASH_PARTS} parts. "
-            "Use app-only firmware.bin, or update K210 flasher before using this image."
+            f"Current K210 ESP flash config supports only {K210_MAX_ESP_FLASH_PARTS} parts."
         )
 
-    logging.info(
-        "payload split: %s offset=0x%08X size=%d -> %d x <= %d byte parts",
-        part.source,
-        part.offset,
-        total,
-        len(chunks),
-        KSD_SAFE_FLASH_PART_BYTES,
-    )
+    logging.info("payload split: %s offset=0x%08X size=%d -> %d x <= %d byte parts",
+                 part.source, part.offset, total, len(chunks), KSD_SAFE_FLASH_PART_BYTES)
     return chunks
 
 
@@ -157,8 +136,7 @@ def split_large_parts(parts: Iterable[FlashPart]) -> list[FlashPart]:
         out.extend(split_large_part(part))
     if len(out) > K210_MAX_ESP_FLASH_PARTS:
         raise SystemExit(
-            f"Payload needs {len(out)} ESP flash parts, but K210 currently supports "
-            f"only {K210_MAX_ESP_FLASH_PARTS}."
+            f"Payload needs {len(out)} ESP flash parts, but K210 currently supports only {K210_MAX_ESP_FLASH_PARTS}."
         )
     return out
 
@@ -197,10 +175,6 @@ def generated_init_sector(build_dir: Path) -> Path:
     existing = find_sdk_blob(build_dir, "esp_init_data_default.bin")
     if existing:
         return existing
-
-    # Last-resort fallback for the no-Wi-Fi SPI test: provide a sector with the
-    # RF init marker byte expected by the old SDK instead of leaving stale 0x00
-    # data in flash. Prefer the SDK file whenever PlatformIO exposes it.
     path = build_dir / "esp_init_data_default_min.bin"
     if not path.exists() or path.stat().st_size != 4096:
         data = bytearray(b"\xff" * 4096)
@@ -215,9 +189,7 @@ def collect_parts(args: argparse.Namespace) -> list[FlashPart]:
     if explicit_fw:
         if not explicit_fw.exists():
             raise SystemExit(f"Firmware file not found: {explicit_fw}")
-        return split_large_parts([
-            FlashPart(explicit_fw, args.remote_name or "esp8285_at.bin", int(args.offset, 0))
-        ])
+        return split_large_parts([FlashPart(explicit_fw, args.remote_name or "esp8285_at.bin", int(args.offset, 0))])
 
     build_dir = maybe_path(args.build_dir) or (ROOT / ".pio" / "build" / args.env)
     boot = build_dir / "firmware.bin"
@@ -230,9 +202,6 @@ def collect_parts(args: argparse.Namespace) -> list[FlashPart]:
         parts = [
             FlashPart(boot, "esp_boot.bin", 0x00000000),
             FlashPart(irom, "esp_irom.bin", 0x00020000),
-            # Keep all generated remote names 8.3-compatible.  The K210 SD path
-            # is currently being debugged; avoiding LFN entries removes one more
-            # source of FAT/root-directory weirdness during repeated tests.
             FlashPart(blank, "rfcal.bin", 0x000FB000),
             FlashPart(init_data, "init.bin", 0x000FC000),
             FlashPart(blank, "sysblk.bin", 0x000FE000),
@@ -267,10 +236,7 @@ def default_flash_config(parts: Iterable[FlashPart]) -> dict:
             "requested_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "esp": {
                 "enabled": 1,
-                "parts": [
-                    {"file": p.remote_name, "offset": f"0x{p.offset:08x}"}
-                    for p in parts
-                ],
+                "parts": [{"file": p.remote_name, "offset": f"0x{p.offset:08x}"} for p in parts],
             },
         }
     }
@@ -327,15 +293,9 @@ def write_payload(parts: list[FlashPart], cfg: dict) -> list[Path]:
     for part in parts:
         dst = OUT_DIR / part.remote_name
         copy_part_payload(part, dst)
-        logging.info(
-            "payload: %s[%d:+%s] -> %s @ 0x%08X (%d bytes)",
-            part.source,
-            part.source_offset,
-            "EOF" if part.size is None else str(part.size),
-            part.remote_name,
-            part.offset,
-            dst.stat().st_size,
-        )
+        logging.info("payload: %s[%d:+%s] -> %s @ 0x%08X (%d bytes)",
+                     part.source, part.source_offset, "EOF" if part.size is None else str(part.size),
+                     part.remote_name, part.offset, dst.stat().st_size)
         written.append(dst)
 
     cfg_path = OUT_DIR / "flash.json"
