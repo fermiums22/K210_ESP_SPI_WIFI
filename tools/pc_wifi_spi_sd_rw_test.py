@@ -57,7 +57,7 @@ class Ksd:
             import serial  # type: ignore
         except ImportError as exc:
             raise SystemExit("pyserial is missing; install requirements.txt") from exc
-        self.ser = serial.Serial(port, baud, timeout=None, write_timeout=None)
+        self.ser = serial.Serial(port, baud, timeout=1.0, write_timeout=5.0)
         self.ser.dtr = False
         self.ser.rts = False
         self.max_lines = max_lines
@@ -68,12 +68,27 @@ class Ksd:
 
     def line(self, stage: str) -> str:
         raw = self.ser.readline()
+        if not raw:
+            raise SystemExit(f"{stage}: no line from K210")
         line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
         logging.info("K210: %s", line)
         return line
 
     def connect(self) -> None:
-        logging.info("KSD connect: send one magic, then wait for HELLO/CMD")
+        logging.info("KSD connect: drain boot banner, send one magic after listener/quiet")
+        for _ in range(self.max_lines):
+            raw = self.ser.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            logging.info("K210: %s", line)
+            if line.startswith("KSD:CMD"):
+                self.have_prompt = True
+                return
+            if line.startswith("KSD:HELLO"):
+                return
+            if line.startswith("KSD:READY") or "PC UART KSD listener" in line:
+                break
         self.ser.write(KSD_MAGIC)
         self.ser.flush()
         guard = LineGuard(self.max_lines, "connect")
