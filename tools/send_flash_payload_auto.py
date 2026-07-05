@@ -17,7 +17,7 @@ if str(TOOLS_DIR) not in sys.path:
 import send_flash_payload as base  # noqa: E402
 
 KSD_DEFAULT_BAUD = 921600
-# K210 now advertises the actual accepted chunk in KSD:GO.  Request 4 KiB first;
+# K210 advertises the actual accepted chunk in KSD:GO.  Request 4 KiB first;
 # if older K210 firmware replies with 512, the client automatically follows it.
 KSD_UPLOAD_CHUNK = 4096
 
@@ -210,6 +210,7 @@ class KsdAutoClient:
         self.stage_line(("KSD:FLASHING", "KSD:ERR"), "FLASH_ESP start ACK")
         logging.info("stage: K210 flashing ESP, then monitoring WiFi/SPI result")
         success_markers = (
+            "BOOT: ESP8285 / ESP8266 RTOS SDK hello_uart",
             "kesp: spi slave ready",
             "[wifi-spi] BEGIN",
             "[wifi-spi] frame magic offset=",
@@ -218,6 +219,8 @@ class KsdAutoClient:
             "ESP flash result: OK",
             "KSD:FLASH_OK",
             "[esp-flash] all parts done",
+            "SDK version:",
+            "alive seq=",
             "kesp: boot",
             "kesp: version=",
             "kesp: wifi begin",
@@ -248,12 +251,12 @@ class KsdAutoClient:
             if any(marker in line for marker in boot_markers):
                 saw_boot_activity = True
             if any(marker in line for marker in success_markers):
-                logging.info("sd-uart monitor: SPI-ready marker found")
+                logging.info("sd-uart monitor: ESP hello/SPI-ready marker found")
                 return
             if any(marker in line for marker in hard_fail_markers):
                 raise SystemExit(f"K210 ESP boot/flash failed: {line}")
         if saw_boot_activity:
-            raise SystemExit("K210 ESP monitor timeout: ESP booted/flashed but no SPI-ready log")
+            raise SystemExit("K210 ESP monitor timeout: ESP booted/flashed but no final ready log")
         raise SystemExit("K210 ESP monitor timeout: no ESP boot log")
 
     def run_spi(self) -> None:
@@ -263,7 +266,8 @@ class KsdAutoClient:
         self.stage_line(("KSD:RUNSPI", "KSD:DONE", "KSD:ERR"), "RUN_SPI ACK")
 
 
-def upload_sd_uart(port: str, baud: int, parts: list[base.FlashPart], reset_mode: str, connect_timeout_s: float) -> None:
+def upload_sd_uart(port: str, baud: int, parts: list[base.FlashPart], reset_mode: str,
+                   connect_timeout_s: float, preserve_flash_json: bool = False) -> None:
     client = KsdAutoClient(port, baud, reset_mode, connect_timeout_s)
     try:
         try:
@@ -272,7 +276,15 @@ def upload_sd_uart(port: str, baud: int, parts: list[base.FlashPart], reset_mode
             if reset_mode == "none":
                 raise SystemExit("KSD service did not answer without reset. Flash/update K210 once, or run with --auto-reset dan.")
             raise
-        existing = client.get_file("flash.json")
+
+        # Do not GET flash.json by default.  That GET was a hidden first SD-init
+        # entry point and it could fail before the real ESP hello upload even
+        # started.  For the deterministic bring-up path we write a fresh one-shot
+        # flash.json generated from the just-built ESP artifacts.
+        existing = client.get_file("flash.json") if preserve_flash_json else None
+        if not preserve_flash_json:
+            logging.info("sd-uart: skip pre-upload GET flash.json; writing fresh one-shot config")
+
         cfg = base.patch_flash_config(existing, parts)
         files = base.write_payload(parts, cfg)
         ordered = [p for p in files if p.name != "flash.json"] + [p for p in files if p.name == "flash.json"]
@@ -302,6 +314,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--offset", default="0x0")
     ap.add_argument("--full-flash", action="store_true", help="Legacy no-op: app-only firmware.bin is now the default")
     ap.add_argument("--force-full-flash", action="store_true", help="Actually upload and flash the 1 MB merged image")
+    ap.add_argument("--preserve-flash-json", action="store_true", help="Read existing flash.json before writing the new one-shot job")
     return ap.parse_args()
 
 
@@ -322,7 +335,7 @@ def main() -> int:
         logging.info("build skipped")
 
     parts = base.collect_parts(args)
-    upload_sd_uart(args.sd_uart, args.sd_baud, parts, args.auto_reset, args.connect_timeout)
+    upload_sd_uart(args.sd_uart, args.sd_baud, parts, args.auto_reset, args.connect_timeout, args.preserve_flash_json)
     logging.info("done. Send this log if flashing fails: %s", log_path)
     return 0
 
