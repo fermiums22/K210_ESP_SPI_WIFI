@@ -4,95 +4,177 @@ ESP8285 bring-up repository for the K210 + ESP8285 link.
 
 Current branch policy: **use `main` only**. Old experiment branches are not part of the normal workflow anymore.
 
-## Current actual status
+## Main goal
 
-The current working state is intentionally small and repeatable:
-
-1. ESP8285 firmware is built with **official Espressif ESP8266_RTOS_SDK v3.4**.
-2. Build is started from normal Windows `cmd.exe`, but the actual ESP build runs through **MSYS2**.
-3. Current ESP application is `hello_uart`:
-   - boots under RTOS SDK;
-   - prints SDK/chip/flash info;
-   - prints `alive seq=...` every second on UART at 115200 baud.
-4. K210 is used as a diagnostic loader:
-   - PC talks to K210 over COM12 / 921600 using the KSD protocol;
-   - PC writes ESP flash payload files to the K210 SD card;
-   - PC sends `FLASH_ESP`;
-   - K210 flashes ESP8285 over ESP UART/BOOT/EN pins;
-   - K210 then bridges ESP UART logs back to PC.
-
-This is the stable checkpoint before implementing the final RTOS Wi-Fi/SPI bridge.
-
-## One-command test
-
-From Windows `cmd.exe`:
-
-```bat
-cd /d D:\w_space\K210_AI_V7s_Plus && git fetch origin --prune && git checkout main && git pull --ff-only origin main && build_k210.bat && flash_k210.bat COM12 --no-build && cd /d D:\w_space\K210_ESP_SPI_WIFI && git fetch origin --prune && git checkout main && git pull --ff-only origin main && run_esp8285_rtos_hello_via_k210.bat COM12
-```
-
-Expected ESP log after successful flash and boot:
+The target development cycle is:
 
 ```text
-BOOT: ESP8285 / ESP8266 RTOS SDK hello_uart
-SDK version: ...
-Flash size=1048576 bytes (1 MB)
-alive seq=0 tick=...
-alive seq=1 tick=...
+PC -> Wi-Fi -> ESP8285 RTOS -> SPI -> K210 -> SD write -> KSD GET -> byte-for-byte verify
 ```
 
-## Build ESP RTOS hello only
+This repository owns the ESP8285 RTOS firmware and the PC-side full-flow scripts.
+The sibling K210 repository owns the K210 firmware, KSD console, SD service, ESP flashing bridge, and SPI receiver:
+
+```text
+D:\w_space\K210_AI_V7s_Plus
+D:\w_space\K210_ESP_SPI_WIFI
+```
+
+## Current actual status
+
+The current working path is now a strict one-pass hardware test:
+
+1. K210 is built and flashed from `K210_AI_V7s_Plus/main`.
+2. Optional local fast tuning is applied to K210 before build:
+   - KSD PUT/GET chunk: 4096 bytes;
+   - KSD task stack: 12288;
+   - ESP flashing baud: 230400;
+   - ESP flashing block: 4096;
+   - KSD file PUT/GET uses direct FatFs in the fast-tuned build.
+3. ESP8285 firmware is built with **official Espressif ESP8266_RTOS_SDK v3.4**.
+4. PC talks to K210 over COM12 / 921600 using KSD.
+5. PC uploads ESP bootloader, partition table, app slices, Wi-Fi config, and `flash.json` to the K210 SD card.
+6. PC sends `FLASH_ESP`.
+7. K210 flashes ESP8285 over ESP UART/BOOT/EN.
+8. PC sends `RUN_SPI`.
+9. ESP8285 boots RTOS firmware, joins Wi-Fi / starts fallback AP, starts TCP server.
+10. PC sends a binary file to ESP TCP.
+11. ESP sends that file over SPI to K210.
+12. K210 writes it to SD as `wifi/pc_wifi_spi_sd.bin`.
+13. PC reads the file back through KSD `GET` and verifies SHA256.
+
+## Full strict test from Windows cmd.exe
+
+Use this command from normal Windows `cmd.exe`.
+
+It intentionally uses `git fetch` + `git switch -f` + `git reset --hard origin/main` instead of `git pull`, so the local workspace is repeatable.
 
 ```bat
-cd /d D:\w_space\K210_ESP_SPI_WIFI && git fetch origin --prune && git checkout main && git pull --ff-only origin main && run_esp8285_rtos_hello_build.bat
+cd /d D:\w_space\K210_AI_V7s_Plus && git fetch origin main && git switch -f main && git reset --hard origin/main && py -3 tools\apply_fast_io_tuning.py --ksd-buf 4096 --ksd-stack 12288 --esp-baud 230400 --esp-block 4096 && call build_k210.bat && call flash_k210.bat COM12 --no-build && cd /d D:\w_space\K210_ESP_SPI_WIFI && git fetch origin main && git switch -f main && git reset --hard origin/main && call run_pc_wifi_spi_sd_full_test.bat COM12 65536
 ```
 
-Expected result:
+Expected K210 tuning line:
+
+```text
+FAST_IO_TUNING_OK ksd_buf=4096 ksd_stack=12288 esp_baud=230400 esp_block=4096 ksd_io=fatfs
+```
+
+Expected K210 build result:
+
+```text
+OK: D:\w_space\K210_AI_V7s_Plus\build\robot_show.bin
+```
+
+Expected K210 KSD console/read-write smoke:
+
+```text
+KSD:GO 4096
+[ksd] PUT OK bytes=4096 chunk=4096 acks=1
+PASS KSD_CONSOLE_RW path=ksd_console_probe.bin size=4096 sha256=...
+```
+
+Expected ESP build result:
 
 ```text
 OK: ESP8285 RTOS SDK hello build finished.
 ```
 
-Build outputs are generated locally under:
+Expected ESP payload upload checkpoint:
 
 ```text
-esp8266_rtos_clean\hello_uart\build\
+PUT esp_010000.bin OK bytes=262144 chunk=4096 acks=64
+PUT esp_050000.bin OK bytes=184592 chunk=4096 acks=46
 ```
 
-Important files:
+Expected ESP flashing checkpoint:
 
 ```text
-bootloader\bootloader.bin              -> offset 0x00000000
-partitions_1mb_singleapp.bin           -> offset 0x00008000
-esp8285-hello-uart.bin                 -> offset 0x00010000
+[esp-flash] connected target=ESP8266/ESP8285
+[esp-flash] session baud=230400 block=4096
+KSD:FLASH_OK
 ```
 
-## Flash ESP RTOS hello through K210
+Expected final result:
+
+```text
+PASS PC_WIFI_SPI_SD path=wifi/pc_wifi_spi_sd.bin size=65536 sha256=...
+```
+
+## Individual commands
+
+### Build K210 only
 
 ```bat
-cd /d D:\w_space\K210_ESP_SPI_WIFI && run_esp8285_rtos_hello_via_k210.bat COM12
+cd /d D:\w_space\K210_AI_V7s_Plus && git fetch origin main && git switch -f main && git reset --hard origin/main && py -3 tools\apply_fast_io_tuning.py --ksd-buf 4096 --ksd-stack 12288 --esp-baud 230400 --esp-block 4096 && call build_k210.bat
 ```
 
-This command:
+### Flash K210 only after successful build
 
-1. builds ESP RTOS hello through MSYS2;
-2. opens K210 KSD service on COM12 / 921600;
-3. writes ESP payload files to the K210 SD card;
-4. sends `FLASH_ESP`;
-5. waits for ESP RTOS hello UART log.
+```bat
+cd /d D:\w_space\K210_AI_V7s_Plus && call flash_k210.bat COM12 --no-build
+```
 
-## Why Arduino path was stopped
+### K210 KSD console/read-write smoke only
 
-Arduino was useful only as a very quick early Wi-Fi/TCP/SPI experiment.
+```bat
+cd /d D:\w_space\K210_AI_V7s_Plus && py -3 tools\ksd_console_rw_test.py --port COM12 --baud 921600 --size 4096
+```
 
-We stopped using it because:
+Expected:
 
-- the target project must use a normal RTOS SDK, not Arduino;
-- ESP8266 Arduino `SPISlave` showed unstable/laggy SPI behavior for this use case;
-- keeping Arduino in the repo started to hide real RTOS bring-up problems;
-- it made the flow look more complete than it actually was.
+```text
+PASS KSD_CONSOLE_RW path=ksd_console_probe.bin size=4096 sha256=...
+```
 
-Therefore Arduino source was removed from the normal `main` flow.
+### Build ESP RTOS hello only
+
+```bat
+cd /d D:\w_space\K210_ESP_SPI_WIFI && git fetch origin main && git switch -f main && git reset --hard origin/main && call run_esp8285_rtos_hello_build.bat
+```
+
+Expected:
+
+```text
+OK: ESP8285 RTOS SDK hello build finished.
+```
+
+### Build + upload + flash ESP via K210 only
+
+```bat
+cd /d D:\w_space\K210_ESP_SPI_WIFI && git fetch origin main && git switch -f main && git reset --hard origin/main && call run_esp8285_rtos_hello_via_k210.bat COM12
+```
+
+### Full PC -> Wi-Fi -> ESP -> SPI -> K210 -> SD test only
+
+Run this only after K210 is already flashed with the matching build.
+
+```bat
+cd /d D:\w_space\K210_ESP_SPI_WIFI && call run_pc_wifi_spi_sd_full_test.bat COM12 65536
+```
+
+## Important logs and what they mean
+
+| Log line | Meaning |
+|---|---|
+| `KSD:GO 4096` | K210 KSD is using the fast 4096-byte binary chunk. |
+| `PASS KSD_CONSOLE_RW ...` | K210 console, SD mount, PUT, GET, and SHA verify work. |
+| `PUT esp_010000.bin OK ...` | ESP app slice was uploaded to SD through KSD. |
+| `[esp-flash] Connected - target: ESP8266` | K210 can put ESP8285 into serial bootloader mode. |
+| `[esp-flash] session baud=230400 block=4096` | Fast ESP flash settings are active. |
+| `KSD:FLASH_OK` | ESP8285 flashing completed. |
+| `[wifi-sd] VERDICT SPI_OK ...` | K210 found a valid KESP SPI frame from ESP8285. |
+| `[wifi-sd] WIFI_SD_OK wifi/pc_wifi_spi_sd.bin ...` | K210 received the TCP payload over SPI and wrote it to SD. |
+| `PASS PC_WIFI_SPI_SD ...` | Full target path passed with byte-for-byte SHA verification. |
+
+## Known failure meanings
+
+| Failure | Meaning / next action |
+|---|---|
+| `GET size: KSD:MISSING` immediately after KSD `PUT OK` | KSD PUT/GET must use direct FatFs, not VFS. Run the full command with the latest `apply_fast_io_tuning.py`; expected line includes `ksd_io=fatfs`. |
+| `FLASH_ESP monitor: no line from K210` | Old PC monitor timeout. Update `K210_ESP_SPI_WIFI/main`; current scripts use blocking serial reads after KSD connect. |
+| `write failed at part ...` during ESP flashing | ESP serial flashing link failed mid-transfer. Use fast tuning first: `--esp-baud 230400 --esp-block 4096`. If it still fails, test a lower baud but keep block 4096. |
+| `[wifi-sd] VERDICT SPI_FAIL` | ESP booted but K210 did not find valid KESP SPI frames. Check SPI pins/mode/CS scan output. |
+| `WIFI_SD_FAIL` or `DATA offset mismatch` | SPI transport corrupted or lost a frame. Keep payload small, inspect K210 `[wifi-sd]` logs. |
 
 ## ESP build path
 
@@ -102,43 +184,19 @@ The selected direction is explicit:
 Windows cmd -> C:\msys64\usr\bin\bash.exe -> D:\w_space\esp8266_sdk\ESP8266_RTOS_SDK -> xtensa-lx106-elf gcc8_4_0
 ```
 
-## What was achieved
-
-- K210 side can be built/flashed from `main`.
-- K210 command firmware has persistent KSD service.
-- K210 no longer waits through a long SD mount retry loop.
-- ESP official RTOS SDK toolchain can build a real ESP8285 app from MSYS2.
-- ESP flash artifacts are known and mapped to explicit offsets.
-- A K210-based upload path exists for flashing those RTOS artifacts through K210.
-
-## What is not implemented yet
-
-The final target is still:
-
-```text
-PC -> Wi-Fi -> ESP8285 RTOS -> SPI -> K210 -> SD read/write
-```
-
-This is **not implemented yet** on the selected official RTOS SDK path.
-
-Next real development step:
-
-1. add Wi-Fi station mode in ESP8266_RTOS_SDK;
-2. add TCP PUT server;
-3. add RTOS SPI slave transfer layer;
-4. keep the K210 SPI scanner/receiver simple and measurable;
-5. only then return to PC -> Wi-Fi -> SPI -> SD throughput tests.
+Do not use Arduino SDK or PlatformIO for this flow.
 
 ## Repository map
 
 ```text
-esp8266_rtos_clean/hello_uart/          Current official RTOS SDK hello project
-run_esp8285_rtos_hello_build.bat        Build ESP RTOS hello through MSYS2
+esp8266_rtos_clean/hello_uart/          Official ESP8266_RTOS_SDK app
+run_esp8285_rtos_hello_build.bat        Build ESP RTOS app through MSYS2
 run_esp8285_rtos_hello_via_k210.bat     Build + upload + flash via K210 KSD
+run_pc_wifi_spi_sd_full_test.bat         Full strict PC -> Wi-Fi -> SPI -> SD verifier
+tools/upload_rtos_hello_via_k210.py     KSD ESP payload uploader and FLASH_ESP monitor
+tools/pc_wifi_spi_sd_rw_test.py         TCP PUT + KSD GET SHA verifier
 tools/esp8266_rtos_build_hello.sh       MSYS build helper
 tools/esp8266_rtos_msys_setup.sh        MSYS/Python dependency setup
-tools/upload_rtos_hello_via_k210.py     K210 KSD upload helper
-tools/upload_rtos_hello_via_k210.py     Strict KSD ESP payload uploader
 out/                                    Generated payload files, ignored
 logs/                                   Generated logs, ignored
 ```
