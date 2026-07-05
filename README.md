@@ -4,6 +4,30 @@ ESP8285 bring-up repository for the K210 + ESP8285 link.
 
 Current branch policy: **use `main` only**. Old experiment branches are not part of the normal workflow anymore.
 
+## Mandatory cross-repo notes
+
+The full PC -> Wi-Fi -> ESP -> SPI -> K210 -> SD verifier depends on the K210 SD backend.
+Before changing ESP-side full-flow scripts because of `KSD:SD_FAIL rw`, read the K210 SD/SPI notes first:
+
+```text
+D:\w_space\K210_AI_V7s_Plus\docs\SD_SPI_K210_REGISTER_MAP.md
+```
+
+Current known K210-side blocker:
+
+```text
+[sdcard] CMD0 r=ff
+KSD:SD_FAIL rw
+```
+
+This means the K210 does not receive a response to the first SD SPI-mode CMD0 on its current SD init path.
+Do not debug ESP Wi-Fi, TCP, SPI framing, SHA verification, or payload size while this K210 SD smoke test fails.
+The expected first K210-side recovery milestone is:
+
+```text
+[sdcard] CMD0 r=01
+```
+
 ## Main goal
 
 The target development cycle is:
@@ -170,6 +194,7 @@ cd /d D:\w_space\K210_ESP_SPI_WIFI && call run_pc_wifi_spi_sd_full_test.bat COM1
 
 | Failure | Meaning / next action |
 |---|---|
+| `KSD:SD_FAIL rw` with `[sdcard] CMD0 r=ff` | K210 SD init did not receive a response to the first SD SPI-mode command. Read `D:\w_space\K210_AI_V7s_Plus\docs\SD_SPI_K210_REGISTER_MAP.md`; this is a K210 SD/SPI/FPIOA/GPIOHS/LCD-bus issue, not ESP. |
 | `KSD:SD_FAIL rw` with `sdcard init rc=255 capacity=0 block=0` | SD driver returned a bad card state immediately after fresh K210 reboot. Update `K210_AI_V7s_Plus/main`; `sd.c` now drops the bad handle and reinitializes SD/SPI/GPIO before declaring failure. |
 | `GET size: KSD:MISSING` immediately after KSD `PUT OK` | KSD PUT/GET must use direct FatFs, not VFS. Run the full command with the latest `apply_fast_io_tuning.py`; expected line includes `ksd_io=fatfs`. |
 | `FLASH_ESP monitor: no line from K210` | Old PC monitor timeout. Update `K210_ESP_SPI_WIFI/main`; current scripts use blocking serial reads after KSD connect. |
