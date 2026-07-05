@@ -143,6 +143,9 @@ class StrictKsd:
             import serial  # type: ignore
         except ImportError as exc:
             raise SystemExit("pyserial is missing; install requirements.txt") from exc
+        # Keep a finite timeout only for the initial boot-banner drain. After the
+        # KSD session is established, reads are blocking so long K210 operations
+        # such as ESP flashing are not misreported as protocol failures.
         self.ser = serial.Serial(port, baud, timeout=1.0, write_timeout=5.0)
         self.ser.dtr = False
         self.ser.rts = False
@@ -181,14 +184,19 @@ class StrictKsd:
             logging.info("K210: %s", line)
             if line.startswith("KSD:CMD"):
                 self.have_prompt = True
+                self.ser.timeout = None
                 return
             if line.startswith("KSD:HELLO"):
+                self.ser.timeout = None
                 return
             if line.startswith("KSD:READY") or "PC UART KSD listener" in line:
                 break
         self.ser.write(KSD_MAGIC)
         self.ser.flush()
-        self.expect(("KSD:HELLO", "KSD:CMD"), "connect")
+        line = self.expect(("KSD:HELLO", "KSD:CMD"), "connect")
+        if line.startswith("KSD:CMD"):
+            self.have_prompt = True
+        self.ser.timeout = None
 
     def prompt(self) -> None:
         if self.have_prompt:
