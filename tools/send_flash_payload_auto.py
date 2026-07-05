@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Automatic K210 SD UART upload path.
-
-This wrapper reuses the existing ESP payload builder, but the K210 UART path is
-fully automatic. With the updated K210 app it no longer needs a K210 reset for
-each ESP-only cycle: PC opens COM, performs KSD handshake against the persistent
-KSD service, writes payload files, sends FLASH_ESP, then monitors Wi-Fi/SPI.
-"""
+"""Automatic K210 SD UART upload path."""
 from __future__ import annotations
 
 import argparse
@@ -22,10 +16,10 @@ if str(TOOLS_DIR) not in sys.path:
 
 import send_flash_payload as base  # noqa: E402
 
-# Must match K210_AI_V7s_Plus/src/log.h APP_LOG_BAUD.
 KSD_DEFAULT_BAUD = 921600
-# Must match K210_AI_V7s_Plus/src/sd_uart.c UART_SD_BUF after the KSD service update.
-KSD_UPLOAD_CHUNK = 512
+# K210 now advertises the actual accepted chunk in KSD:GO.  Request 4 KiB first;
+# if older K210 firmware replies with 512, the client automatically follows it.
+KSD_UPLOAD_CHUNK = 4096
 
 
 class KsdAutoClient:
@@ -116,10 +110,7 @@ class KsdAutoClient:
 
     def connect(self) -> None:
         logging.info("sd-uart: opening %s @ %d", self.port, self.baud)
-        if self.reset_mode != "none":
-            logging.info("stage: automatic K210 reset")
-        else:
-            logging.info("stage: persistent KSD handshake without K210 reset")
+        logging.info("stage: %s", "automatic K210 reset" if self.reset_mode != "none" else "persistent KSD handshake without K210 reset")
         self.auto_reset()
         logging.info("stage: KSD handshake; no SD write and no ESP flash yet")
         next_magic = 0.0
@@ -225,6 +216,7 @@ class KsdAutoClient:
         )
         boot_markers = (
             "ESP flash result: OK",
+            "KSD:FLASH_OK",
             "[esp-flash] all parts done",
             "kesp: boot",
             "kesp: version=",
@@ -237,9 +229,17 @@ class KsdAutoClient:
             "[esp-flash] connect failed",
             "[esp-flash] image missing",
             "[esp-flash] bad image size",
+            "[esp-flash] write failed",
+            "[esp-flash] finish failed",
             "KSD:FLASH_FAIL",
+            "csum err",
+            "checksum",
+            "invalid header",
+            "wrong magic",
+            "Fatal exception",
+            "Exception (",
         )
-        deadline = time.monotonic() + 240.0
+        deadline = time.monotonic() + 60.0
         saw_boot_activity = False
         while time.monotonic() < deadline:
             line = self.read_line_once()
@@ -251,9 +251,9 @@ class KsdAutoClient:
                 logging.info("sd-uart monitor: SPI-ready marker found")
                 return
             if any(marker in line for marker in hard_fail_markers):
-                raise SystemExit(f"K210 ESP flash failed: {line}")
+                raise SystemExit(f"K210 ESP boot/flash failed: {line}")
         if saw_boot_activity:
-            raise SystemExit("K210 ESP monitor timeout: ESP booted but no SPI-ready log")
+            raise SystemExit("K210 ESP monitor timeout: ESP booted/flashed but no SPI-ready log")
         raise SystemExit("K210 ESP monitor timeout: no ESP boot log")
 
     def run_spi(self) -> None:
@@ -276,13 +276,11 @@ def upload_sd_uart(port: str, baud: int, parts: list[base.FlashPart], reset_mode
         cfg = base.patch_flash_config(existing, parts)
         files = base.write_payload(parts, cfg)
         ordered = [p for p in files if p.name != "flash.json"] + [p for p in files if p.name == "flash.json"]
-
         logging.info("planned SD writes:")
         for path in ordered:
             logging.info("  PUT %s (%d bytes)", path.name, path.stat().st_size)
         logging.info("new flash_once section:")
         logging.info(json.dumps(cfg.get("flash_once", {}), indent=2))
-
         for path in ordered:
             client.put_file(path, path.name)
         client.flash_esp_and_monitor()
