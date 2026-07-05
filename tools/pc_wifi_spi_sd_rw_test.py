@@ -57,6 +57,9 @@ class Ksd:
             import serial  # type: ignore
         except ImportError as exc:
             raise SystemExit("pyserial is missing; install requirements.txt") from exc
+        # Finite timeout is used only for initial boot-banner drain. Once KSD is
+        # connected, reads become blocking so normal quiet periods do not look
+        # like protocol failures.
         self.ser = serial.Serial(port, baud, timeout=1.0, write_timeout=5.0)
         self.ser.dtr = False
         self.ser.rts = False
@@ -84,8 +87,10 @@ class Ksd:
             logging.info("K210: %s", line)
             if line.startswith("KSD:CMD"):
                 self.have_prompt = True
+                self.ser.timeout = None
                 return
             if line.startswith("KSD:HELLO"):
+                self.ser.timeout = None
                 return
             if line.startswith("KSD:READY") or "PC UART KSD listener" in line:
                 break
@@ -98,9 +103,11 @@ class Ksd:
             if line.startswith("KSD:ERR"):
                 raise SystemExit(f"connect: {line}")
             if line.startswith("KSD:HELLO"):
+                self.ser.timeout = None
                 return
             if line.startswith("KSD:CMD"):
                 self.have_prompt = True
+                self.ser.timeout = None
                 return
 
     def wait_prompt(self, stage: str) -> None:
