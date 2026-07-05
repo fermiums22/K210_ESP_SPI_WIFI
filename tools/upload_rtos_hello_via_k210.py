@@ -6,7 +6,6 @@ import json
 import logging
 import shutil
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -148,6 +147,7 @@ class StrictKsd:
         self.ser.dtr = False
         self.ser.rts = False
         self.have_prompt = False
+        self.quiet_ack_count = 0
 
     def close(self) -> None:
         self.ser.close()
@@ -157,7 +157,10 @@ class StrictKsd:
         if not raw:
             raise SystemExit(f"{stage}: no line from K210")
         line = raw.decode("utf-8", errors="replace").rstrip()
-        logging.info("K210: %s", line)
+        if line == "KSD:B":
+            self.quiet_ack_count += 1
+        else:
+            logging.info("K210: %s", line)
         return line
 
     def expect(self, prefixes: tuple[str, ...], stage: str) -> str:
@@ -169,7 +172,7 @@ class StrictKsd:
                 return line
 
     def connect(self) -> None:
-        logging.info("KSD strict connect: drain boot banner, then send one magic")
+        logging.info("KSD strict connect: drain boot banner, send one magic after listener/quiet")
         while True:
             raw = self.ser.readline()
             if not raw:
@@ -179,11 +182,13 @@ class StrictKsd:
             if line.startswith("KSD:CMD"):
                 self.have_prompt = True
                 return
-            if "PC UART KSD listener" in line:
+            if line.startswith("KSD:HELLO"):
+                return
+            if line.startswith("KSD:READY") or "PC UART KSD listener" in line:
                 break
         self.ser.write(KSD_MAGIC)
         self.ser.flush()
-        self.expect(("KSD:HELLO",), "connect")
+        self.expect(("KSD:HELLO", "KSD:CMD"), "connect")
 
     def prompt(self) -> None:
         if self.have_prompt:
@@ -204,6 +209,7 @@ class StrictKsd:
             chunk_size = int(parts[1])
         self.expect(("KSD:READYDATA",), f"PUT {remote} READYDATA")
         sent = 0
+        ack_start = self.quiet_ack_count
         with path.open("rb") as f:
             while sent < size:
                 chunk = f.read(chunk_size)
@@ -213,7 +219,10 @@ class StrictKsd:
                 self.ser.flush()
                 sent += len(chunk)
                 self.expect(("KSD:B",), f"PUT {remote} block {sent}/{size}")
+                if sent == size or (sent % (32 * 1024)) == 0:
+                    logging.info("PUT %s progress %d/%d bytes", remote, sent, size)
         self.expect(("KSD:OK",), f"PUT {remote} final")
+        logging.info("PUT %s OK bytes=%d chunk=%d acks=%d", remote, sent, chunk_size, self.quiet_ack_count - ack_start)
 
     def flash_esp(self) -> None:
         self.prompt()
