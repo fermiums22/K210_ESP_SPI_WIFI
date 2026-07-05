@@ -43,6 +43,8 @@ def wait_result(c: KsdAutoClient):
         'ESP flash result: FAIL',
         'KSD:FLASH_FAIL',
         '[esp-flash] connect failed',
+        '[esp-flash] image missing',
+        '[esp-flash] bad image size',
         '[esp-flash] write failed',
         '[esp-flash] finish failed',
         'csum err',
@@ -89,8 +91,10 @@ def main():
     c = KsdAutoClient(args.sd_uart, args.sd_baud, 'none', args.connect_timeout)
     try:
         c.connect()
-        existing = c.get_file('flash.json')
-        cfg = base.patch_flash_config(existing, parts)
+        # Deterministic RTOS hello bring-up must not pre-read flash.json.
+        # The old GET flash.json was a hidden SD-init entry point before upload.
+        logging.info('sd-uart: skip pre-upload GET flash.json; writing fresh RTOS hello one-shot config')
+        cfg = base.patch_flash_config(None, parts)
         files = base.write_payload(parts, cfg)
         ordered = [p for p in files if p.name != 'flash.json'] + [p for p in files if p.name == 'flash.json']
         logging.info('new flash_once section:')
