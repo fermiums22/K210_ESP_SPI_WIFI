@@ -12,10 +12,10 @@ if %ERRORLEVEL%==0 (
   set "PY=python"
 )
 
-echo === ESP8285 official ESP8266_RTOS_SDK hello via K210 ===
+echo === ESP8285 official ESP8266_RTOS_SDK WiFi/SPI/SD via K210 ===
 echo Repo: %CD%
 echo KSD:  %PORT% @ 921600
-echo Flow: MSYS build -^> KSD PUT -^> FLASH_ESP -^> ESP RTOS UART hello monitor
+echo Flow: MSYS build -^> strict KSD PUT -^> FLASH_ESP -^> ESP WiFi/SPI/SD monitor
 echo No Arduino. No PlatformIO.
 echo.
 

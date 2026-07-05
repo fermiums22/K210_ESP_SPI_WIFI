@@ -26,3 +26,4 @@ firmware/**/*.bin
 # Windows noise
 Thumbs.db
 Desktop.ini
+.local-tools

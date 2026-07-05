@@ -94,21 +94,12 @@ We stopped using it because:
 
 Therefore Arduino source was removed from the normal `main` flow.
 
-## Why PlatformIO RTOS path was stopped
+## ESP build path
 
-PlatformIO was also tested as an ESP8266 RTOS build wrapper.
-
-We stopped using it because:
-
-- the ESP8266 RTOS support in PlatformIO is old and unclear;
-- the exact toolchain/package mapping is not transparent enough for a repeatable product workflow;
-- it mixed `.pio` artifacts and framework assumptions into the repo;
-- it was hard to reason about which SDK/toolchain version was actually used.
-
-The selected direction is now explicit:
+The selected direction is explicit:
 
 ```text
-Windows cmd -> C:\msys64\usr\bin\bash.exe -> official ESP8266_RTOS_SDK v3.4 -> xtensa-lx106-elf gcc8_4_0
+Windows cmd -> C:\msys64\usr\bin\bash.exe -> D:\w_space\esp8266_sdk\ESP8266_RTOS_SDK -> xtensa-lx106-elf gcc8_4_0
 ```
 
 ## What was achieved
@@ -147,7 +138,7 @@ run_esp8285_rtos_hello_via_k210.bat     Build + upload + flash via K210 KSD
 tools/esp8266_rtos_build_hello.sh       MSYS build helper
 tools/esp8266_rtos_msys_setup.sh        MSYS/Python dependency setup
 tools/upload_rtos_hello_via_k210.py     K210 KSD upload helper
-tools/send_flash_payload*.py            Shared KSD payload helpers
+tools/upload_rtos_hello_via_k210.py     Strict KSD ESP payload uploader
 out/                                    Generated payload files, ignored
 logs/                                   Generated logs, ignored
 ```
