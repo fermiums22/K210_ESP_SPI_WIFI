@@ -15,7 +15,10 @@ set "ESPPORT=%~1"
 set "ESPBAUD=%~2"
 if "%ESPBAUD%"=="" set "ESPBAUD=460800"
 
-set "SDK_ROOT=C:\ESP8266\sdk"
+set "SDK_ROOT=%ESP_SDK_ROOT%"
+if "%SDK_ROOT%"=="" if exist "C:\ESP8266\sdk\ESP8266_RTOS_SDK\make\project.mk" set "SDK_ROOT=C:\ESP8266\sdk"
+if "%SDK_ROOT%"=="" if exist "D:\w_space\esp8266_sdk\ESP8266_RTOS_SDK\make\project.mk" set "SDK_ROOT=D:\w_space\esp8266_sdk"
+if "%SDK_ROOT%"=="" set "SDK_ROOT=C:\ESP8266\sdk"
 set "SDK_DIR=%SDK_ROOT%\ESP8266_RTOS_SDK"
 set "TOOLCHAIN_DIR=%SDK_ROOT%\xtensa-lx106-elf"
 set "TOOLCHAIN_GCC=%TOOLCHAIN_DIR%\bin\xtensa-lx106-elf-gcc.exe"
@@ -23,7 +26,8 @@ set "TOOLCHAIN_ZIP=%SDK_ROOT%\xtensa-lx106-elf-gcc8_4_0-esp-2020r3-win32.zip"
 set "TOOLCHAIN_URL=https://dl.espressif.com/dl/xtensa-lx106-elf-gcc8_4_0-esp-2020r3-win32.zip"
 set "HELPER_WIN=%CD%\tools\esp8266_rtos_flash_hello.sh"
 set "PROJ_WIN=%CD%\esp8266_rtos_clean\hello_uart"
-set "BASH=C:\msys64\usr\bin\bash.exe"
+set "BASH=%MSYS2_BASH%"
+if "%BASH%"=="" if exist "C:\msys64\usr\bin\bash.exe" set "BASH=C:\msys64\usr\bin\bash.exe"
 
 if not exist "%SDK_DIR%\make\project.mk" (
     echo ERROR: ESP8266_RTOS_SDK not found at %SDK_DIR%

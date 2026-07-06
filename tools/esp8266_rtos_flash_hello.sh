@@ -11,8 +11,17 @@ ESPPORT="$1"
 ESPBAUD="${2:-460800}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-SDK="${IDF_PATH:-/c/ESP8266/sdk/ESP8266_RTOS_SDK}"
-SDK_ROOT="${ESP_SDK_ROOT:-/c/ESP8266/sdk}"
+SDK="${IDF_PATH:-}"
+if [ -z "$SDK" ]; then
+    for base in /c/ESP8266/sdk /d/w_space/esp8266_sdk; do
+        if [ -f "$base/ESP8266_RTOS_SDK/make/project.mk" ]; then
+            SDK="$base/ESP8266_RTOS_SDK"
+            break
+        fi
+    done
+fi
+SDK="${SDK:-/c/ESP8266/sdk/ESP8266_RTOS_SDK}"
+SDK_ROOT="${ESP_SDK_ROOT:-$(dirname "$SDK")}"
 PROJ="${ESP_HELLO_PROJ:-$REPO_DIR/esp8266_rtos_clean/hello_uart}"
 TOOLCHAIN_BIN="$SDK_ROOT/xtensa-lx106-elf/bin"
 SETUP_SCRIPT="$SCRIPT_DIR/esp8266_rtos_msys_setup.sh"
