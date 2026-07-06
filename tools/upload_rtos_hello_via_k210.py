@@ -64,8 +64,8 @@ def write_wifi_config() -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     body = {
         "mode": "sta_ap",
-        "ssid": "Fermiums_2.4",
-        "pass": "876543212",
+        "ssid": "ELECTRONICS",
+        "pass": "bdc123print",
         "tcp_port": 18080,
     }
     data = ("KESPJSON\n" + json.dumps(body, indent=2) + "\n").encode("utf-8")

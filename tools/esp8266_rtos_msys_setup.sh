@@ -5,7 +5,7 @@ set -euo pipefail
 # Only install package names that exist in the MSYS repo used by C:\msys64\usr\bin\bash.exe.
 # The ESP8266 xtensa toolchain is handled separately by the Windows BAT file.
 
-LOCAL_TOOLS="/d/w_space/K210_ESP_SPI_WIFI/.local-tools"
+LOCAL_TOOLS="${ESP_REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/.local-tools"
 PY_VENV="$LOCAL_TOOLS/esp8266_py"
 SETUP_MARKER="$LOCAL_TOOLS/msys_setup_venv_pyparsing_ok"
 

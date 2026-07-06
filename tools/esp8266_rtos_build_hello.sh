@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SDK="/d/w_space/esp8266_sdk/ESP8266_RTOS_SDK"
-PROJ="/d/w_space/K210_ESP_SPI_WIFI/esp8266_rtos_clean/hello_uart"
-TOOLCHAIN_BIN="/d/w_space/esp8266_sdk/xtensa-lx106-elf/bin"
-SETUP_SCRIPT="/d/w_space/K210_ESP_SPI_WIFI/tools/esp8266_rtos_msys_setup.sh"
-PY_SHIMS="/d/w_space/K210_ESP_SPI_WIFI/tools/python_shims"
-PY_VENV_BIN="/d/w_space/K210_ESP_SPI_WIFI/.local-tools/esp8266_py/bin"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SDK="${IDF_PATH:-/c/ESP8266/sdk/ESP8266_RTOS_SDK}"
+SDK_ROOT="${ESP_SDK_ROOT:-/c/ESP8266/sdk}"
+PROJ="${ESP_HELLO_PROJ:-$REPO_DIR/esp8266_rtos_clean/hello_uart}"
+TOOLCHAIN_BIN="$SDK_ROOT/xtensa-lx106-elf/bin"
+SETUP_SCRIPT="$SCRIPT_DIR/esp8266_rtos_msys_setup.sh"
+PY_SHIMS="$SCRIPT_DIR/python_shims"
+PY_VENV_BIN="$REPO_DIR/.local-tools/esp8266_py/bin"
+export ESP_REPO_DIR="$REPO_DIR"
 
 ensure_toolchain_cmd()
 {

@@ -3,13 +3,14 @@ setlocal EnableExtensions
 
 cd /d "%~dp0"
 
-set "SDK_ROOT=D:\w_space\esp8266_sdk"
+set "SDK_ROOT=C:\ESP8266\sdk"
 set "SDK_DIR=%SDK_ROOT%\ESP8266_RTOS_SDK"
 set "TOOLCHAIN_DIR=%SDK_ROOT%\xtensa-lx106-elf"
 set "TOOLCHAIN_GCC=%TOOLCHAIN_DIR%\bin\xtensa-lx106-elf-gcc.exe"
 set "TOOLCHAIN_ZIP=%SDK_ROOT%\xtensa-lx106-elf-gcc8_4_0-esp-2020r3-win32.zip"
 set "TOOLCHAIN_URL=https://dl.espressif.com/dl/xtensa-lx106-elf-gcc8_4_0-esp-2020r3-win32.zip"
-set "HELPER=/d/w_space/K210_ESP_SPI_WIFI/tools/esp8266_rtos_build_hello.sh"
+set "HELPER_WIN=%CD%\tools\esp8266_rtos_build_hello.sh"
+set "PROJ_WIN=%CD%\esp8266_rtos_clean\hello_uart"
 set "BASH=C:\msys64\usr\bin\bash.exe"
 
 if not exist "%SDK_DIR%\make\project.mk" (
@@ -31,7 +32,7 @@ if not exist "%TOOLCHAIN_GCC%" (
 )
 
 echo Running ESP8285 RTOS SDK hello build...
-"%BASH%" -lc "export MSYSTEM=MINGW32; source /etc/profile; export IDF_PATH=/d/w_space/esp8266_sdk/ESP8266_RTOS_SDK; bash '%HELPER%'"
+"%BASH%" -lc "export MSYSTEM=MINGW32; source /etc/profile; export IDF_PATH=\"$(cygpath -u '%SDK_DIR%')\"; export ESP_SDK_ROOT=\"$(cygpath -u '%SDK_ROOT%')\"; export ESP_HELLO_PROJ=\"$(cygpath -u '%PROJ_WIN%')\"; bash \"$(cygpath -u '%HELPER_WIN%')\""
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (
