@@ -41,6 +41,14 @@ def setup_logging() -> Path:
     return log_path
 
 
+def first_existing(paths: list[Path], label: str) -> Path:
+    for p in paths:
+        if p.exists():
+            logging.info("using %s artifact: %s", label, p.name)
+            return p
+    raise SystemExit("missing ESP build artifact for " + label + ": " + ", ".join(str(p) for p in paths))
+
+
 def part_size(p: FlashPart) -> int:
     return p.size if p.size is not None else p.source.stat().st_size - p.source_offset
 
@@ -76,12 +84,13 @@ def write_wifi_config() -> Path:
 
 
 def build_parts(build_dir: Path) -> list[FlashPart]:
-    boot = build_dir / "bootloader" / "bootloader.bin"
-    table = build_dir / "partitions_1mb_singleapp.bin"
-    app = build_dir / "esp8285-hello-uart.bin"
-    missing = [p for p in (boot, table, app) if not p.exists()]
-    if missing:
-        raise SystemExit("missing ESP build artifacts: " + ", ".join(str(p) for p in missing))
+    boot = first_existing([build_dir / "bootloader" / "bootloader.bin"], "bootloader")
+    table = first_existing([
+        build_dir / "partitions_1mb_singleapp.bin",
+        build_dir / "partitions_singleapp.bin",
+        build_dir / "partition_table" / "partition-table.bin",
+    ], "partition table")
+    app = first_existing([build_dir / "esp8285-hello-uart.bin"], "app")
     raw = [
         FlashPart(boot, "esp_boot.bin", 0x00000000),
         FlashPart(table, "esp_part.bin", 0x00008000),
@@ -143,9 +152,6 @@ class StrictKsd:
             import serial  # type: ignore
         except ImportError as exc:
             raise SystemExit("pyserial is missing; install requirements.txt") from exc
-        # Keep a finite timeout only for the initial boot-banner drain. After the
-        # KSD session is established, reads are blocking so long K210 operations
-        # such as ESP flashing are not misreported as protocol failures.
         self.ser = serial.Serial(port, baud, timeout=1.0, write_timeout=5.0)
         self.ser.dtr = False
         self.ser.rts = False
