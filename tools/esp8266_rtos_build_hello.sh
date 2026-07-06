@@ -35,6 +35,57 @@ ensure_toolchain_cmd()
     exit 3
 }
 
+force_esp8285_1mb_dout_config()
+{
+    cat > sdkconfig.defaults <<'EOF'
+CONFIG_ESPTOOLPY_FLASHMODE_DOUT=y
+CONFIG_ESPTOOLPY_FLASHMODE="dout"
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y
+CONFIG_ESPTOOLPY_FLASHFREQ="40m"
+CONFIG_ESPTOOLPY_FLASHSIZE_1MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="1MB"
+CONFIG_ESPTOOLPY_FLASHSIZE_DETECT=n
+EOF
+
+    local marker=".config_esp8285_1mb_dout_v2"
+    if [ ! -f "$marker" ] || ! grep -q 'CONFIG_ESPTOOLPY_FLASHMODE="dout"' sdkconfig 2>/dev/null || ! grep -q 'CONFIG_ESPTOOLPY_FLASHSIZE="1MB"' sdkconfig 2>/dev/null; then
+        echo "Forcing ESP8285 flash config: DOUT, 40MHz, 1MB -> clean rebuild"
+        rm -rf build sdkconfig
+        make defconfig
+        python - <<'PY'
+from pathlib import Path
+p = Path('sdkconfig')
+s = p.read_text(encoding='utf-8') if p.exists() else ''
+forced = {
+    'CONFIG_ESPTOOLPY_FLASHMODE_DOUT': 'y',
+    'CONFIG_ESPTOOLPY_FLASHMODE': '"dout"',
+    'CONFIG_ESPTOOLPY_FLASHFREQ_40M': 'y',
+    'CONFIG_ESPTOOLPY_FLASHFREQ': '"40m"',
+    'CONFIG_ESPTOOLPY_FLASHSIZE_1MB': 'y',
+    'CONFIG_ESPTOOLPY_FLASHSIZE': '"1MB"',
+    'CONFIG_ESPTOOLPY_FLASHSIZE_DETECT': 'n',
+}
+lines = []
+seen = set()
+for line in s.splitlines():
+    key = line.split('=', 1)[0] if '=' in line else None
+    if key in forced:
+        lines.append(f'{key}={forced[key]}')
+        seen.add(key)
+    else:
+        lines.append(line)
+for key, val in forced.items():
+    if key not in seen:
+        lines.append(f'{key}={val}')
+p.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+print('sdkconfig forced: dout 40m 1MB')
+PY
+        touch "$marker"
+    else
+        echo "ESP8285 flash config already forced: DOUT, 40MHz, 1MB"
+    fi
+}
+
 cd "$SDK"
 
 echo "=== ESP8266_RTOS_SDK hello build ==="
@@ -75,13 +126,10 @@ echo "Building hello_uart incrementally..."
 cd "$PROJ"
 if [ "${ESP8266_RTOS_FORCE_REBUILD:-0}" = "1" ]; then
     echo "ESP8266_RTOS_FORCE_REBUILD=1 -> removing build directory and sdkconfig"
-    rm -rf build sdkconfig
+    rm -rf build sdkconfig .config_esp8285_1mb_dout_v2
 fi
 
-if [ ! -f sdkconfig ]; then
-    make defconfig
-fi
-
+force_esp8285_1mb_dout_config
 make -j"${NUMBER_OF_PROCESSORS:-4}"
 
 echo
