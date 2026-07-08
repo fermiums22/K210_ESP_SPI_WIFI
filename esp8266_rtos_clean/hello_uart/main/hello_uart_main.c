@@ -25,6 +25,8 @@
 #define KESP_CONFIG_FLASH_ADDR 0x000E0000u
 #define KESP_CONFIG_MAGIC      "KESPJSON"
 #define KESP_TCP_PORT_DEFAULT  18080
+#define KESP_STA_SSID_DEFAULT  "ELECTRONICS"
+#define KESP_STA_PASS_DEFAULT  "bdc123print"
 #define KESP_AP_SSID           "KESP-SD"
 #define KESP_AP_PASS           ""
 
@@ -72,8 +74,8 @@ static volatile uint32_t s_tcp_files;
 static volatile uint32_t s_tcp_bytes;
 static kesp_config_t s_cfg = {
     .mode = "sta_ap",
-    .ssid = "",
-    .pass = "",
+    .ssid = KESP_STA_SSID_DEFAULT,
+    .pass = KESP_STA_PASS_DEFAULT,
     .tcp_port = KESP_TCP_PORT_DEFAULT,
 };
 
@@ -396,7 +398,7 @@ static void wifi_start(void)
 
     wifi_mode_t mode = WIFI_MODE_APSTA;
     if (strcmp(s_cfg.mode, "sta") == 0) mode = WIFI_MODE_STA;
-    if (strcmp(s_cfg.mode, "ap") == 0) mode = WIFI_MODE_AP;
+    if (strcmp(s_cfg.mode, "ap") == 0) mode = s_cfg.ssid[0] ? WIFI_MODE_APSTA : WIFI_MODE_AP;
     ESP_ERROR_CHECK(esp_wifi_set_mode(mode));
 
     if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA) {

@@ -12,7 +12,7 @@ def main(argv):
     host = argv[1]
     local = Path(argv[2])
     remote = argv[3].replace("\\", "/")
-    port = int(argv[4]) if len(argv) > 4 else 7777
+    port = int(argv[4]) if len(argv) > 4 else 18080
     data_len = local.stat().st_size
 
     start = time.time()
