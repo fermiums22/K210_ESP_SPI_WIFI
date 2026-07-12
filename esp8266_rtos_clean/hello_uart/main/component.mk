@@ -1,1 +1,0 @@
-# Component makefile intentionally empty.

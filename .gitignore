@@ -1,29 +1,12 @@
-.pio
-.vscode/.browse.c_cpp.db*
-.vscode/c_cpp_properties.json
-.vscode/launch.json
-.vscode/ipch
-
-# Local Python helper environment
+.local-tools/
 .venv/
 __pycache__/
 *.pyc
+*.exe
 
-# Generated helper output
-build/
-logs/
-out/
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
 
-# ESP8266_RTOS_SDK local generated files
-esp8266_rtos_clean/**/sdkconfig
-esp8266_rtos_clean/**/sdkconfig.old
-esp8266_rtos_clean/**/.local-tools/
-
-# Local firmware binaries
-firmware/*.bin
-firmware/**/*.bin
-
-# Windows noise
 Thumbs.db
 Desktop.ini
-.local-tools

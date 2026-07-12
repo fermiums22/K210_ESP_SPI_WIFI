@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "bridge_main.c"
+        "../../protocol/klink_v1.c"
+        "../../protocol/klink_v1_link.c"
+        "../../protocol/kupdate_v2.c"
+    INCLUDE_DIRS
+        "."
+        "../../protocol"
+)
