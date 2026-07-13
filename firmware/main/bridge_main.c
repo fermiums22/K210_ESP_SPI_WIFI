@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -6,6 +7,7 @@
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -27,6 +29,25 @@
 #define UPLINK_RING_BYTES   8192u
 #define CONSOLE_RX_BYTES    2048u
 #define CONSOLE_TX_BYTES    4096u
+#define ESP_OTA_PORT        21001u
+#define ESP_OTA_MAGIC       0x41544f45u
+#define ESP_OTA_FLAG_DUAL   0x00000001u
+#define ESP_OTA_READY       UINT32_MAX
+#define ESP_OTA_PROGRESS    (UINT32_MAX - 1u)
+
+typedef struct __attribute__((packed)) esp_ota_request {
+    uint32_t magic;
+    uint32_t image_size;
+    uint32_t image_crc32;
+    uint32_t flags;
+} esp_ota_request_t;
+
+typedef struct __attribute__((packed)) esp_ota_status {
+    uint32_t magic;
+    uint32_t result;
+    uint32_t received;
+    uint32_t detail;
+} esp_ota_status_t;
 
 static const char *TAG = "kesp";
 static kstream_master_buffers_t s_streams;
@@ -36,6 +57,9 @@ static int s_uplink_udp_fd = -1;
 static volatile uint32_t s_uplink_peer_seq;
 static volatile uint32_t s_uplink_peer_addr;
 static volatile uint16_t s_uplink_peer_port;
+static volatile int s_console_send_errno;
+static volatile uint32_t s_console_send_count;
+static volatile int s_console_recv_errno;
 
 static int listener_open(uint16_t port)
 {
@@ -62,12 +86,165 @@ static int send_all(int fd, const void *data, size_t length)
     const uint8_t *bytes = (const uint8_t *)data;
     while (length != 0u) {
         int sent = send(fd, bytes, length, 0);
+        if (sent < 0 && errno == EINTR)
+            continue;
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            fd_set writable;
+            FD_ZERO(&writable);
+            FD_SET(fd, &writable);
+            if (select(fd + 1, NULL, &writable, NULL, NULL) > 0)
+                continue;
+        }
         if (sent <= 0)
             return -1;
         bytes += sent;
         length -= (size_t)sent;
     }
     return 0;
+}
+
+static int recv_all(int fd, void *data, size_t length)
+{
+    uint8_t *bytes = (uint8_t *)data;
+    while (length != 0u) {
+        int received = recv(fd, bytes, length, 0);
+        if (received < 0 && errno == EINTR)
+            continue;
+        if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            fd_set readable;
+            FD_ZERO(&readable);
+            FD_SET(fd, &readable);
+            if (select(fd + 1, &readable, NULL, NULL, NULL) > 0)
+                continue;
+        }
+        if (received <= 0)
+            return -1;
+        bytes += received;
+        length -= (size_t)received;
+    }
+    return 0;
+}
+
+static uint32_t crc32_update(uint32_t crc, const void *data, size_t length)
+{
+    const uint8_t *bytes = (const uint8_t *)data;
+    while (length-- != 0u) {
+        crc ^= *bytes++;
+        for (unsigned bit = 0; bit < 8u; ++bit)
+            crc = (crc >> 1u) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    return crc;
+}
+
+static int ota_status_send(int fd, uint32_t result, uint32_t received,
+                           uint32_t detail)
+{
+    esp_ota_status_t status = {ESP_OTA_MAGIC, result, received, detail};
+    return send_all(fd, &status, sizeof(status));
+}
+
+static bool ota_receive_client(int fd)
+{
+    esp_ota_request_t request;
+    if (recv_all(fd, &request, sizeof(request)) != 0 ||
+        request.magic != ESP_OTA_MAGIC ||
+        request.flags != ESP_OTA_FLAG_DUAL) {
+        ota_status_send(fd, 1u, 0u, 0u);
+        return false;
+    }
+    const esp_partition_t *partition = esp_ota_get_next_update_partition(NULL);
+    uint32_t slot_size = request.image_size;
+    uint32_t slot_index = partition ?
+        partition->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0 : 2u;
+    if (!partition || slot_index > 1u || slot_size == 0u ||
+        slot_size > partition->size) {
+        ota_status_send(fd, 2u, 0u, partition ? partition->size : 0u);
+        return false;
+    }
+    ESP_LOGI(TAG, "OTA_PREPARE slot=%lu bytes=%lu",
+             (unsigned long)slot_index, (unsigned long)slot_size);
+    esp_ota_handle_t handle;
+    esp_err_t error = esp_ota_begin(partition, slot_size, &handle);
+    if (error != ESP_OK) {
+        ota_status_send(fd, 3u, 0u, (uint32_t)error);
+        return false;
+    }
+    vTaskDelay(1u);
+    if (ota_status_send(fd, ESP_OTA_READY, 0u, partition->subtype) != 0) {
+        (void)esp_ota_end(handle);
+        return false;
+    }
+    uint32_t expected_crc;
+    if (recv_all(fd, &expected_crc, sizeof(expected_crc)) != 0) {
+        (void)esp_ota_end(handle);
+        return false;
+    }
+    uint8_t buffer[1024];
+    uint32_t received = 0u;
+    uint32_t crc = UINT32_MAX;
+    while (received < slot_size) {
+        size_t count = slot_size - received;
+        if (count > sizeof(buffer))
+            count = sizeof(buffer);
+        if (recv_all(fd, buffer, count) != 0) {
+            (void)esp_ota_end(handle);
+            ota_status_send(fd, 4u, received, 0u);
+            return false;
+        }
+        crc = crc32_update(crc, buffer, count);
+        error = esp_ota_write(handle, buffer, count);
+        if (error != ESP_OK) {
+            (void)esp_ota_end(handle);
+            ota_status_send(fd, 5u, received, (uint32_t)error);
+            return false;
+        }
+        received += count;
+        if ((received & 4095u) == 0u || received == slot_size) {
+            if (ota_status_send(fd, ESP_OTA_PROGRESS, received, 0u) != 0) {
+                (void)esp_ota_end(handle);
+                return false;
+            }
+        }
+    }
+    ESP_LOGI(TAG, "OTA_RECEIVED bytes=%lu", (unsigned long)received);
+    crc ^= UINT32_MAX;
+    if (crc != expected_crc) {
+        (void)esp_ota_end(handle);
+        ota_status_send(fd, 6u, received, crc);
+        return false;
+    }
+    error = esp_ota_end(handle);
+    if (error == ESP_OK)
+        error = esp_ota_set_boot_partition(partition);
+    if (error != ESP_OK) {
+        ota_status_send(fd, 7u, received, (uint32_t)error);
+        return false;
+    }
+    ota_status_send(fd, 0u, received, crc);
+    return true;
+}
+
+static void ota_server_task(void *arg)
+{
+    (void)arg;
+    int listener = listener_open(ESP_OTA_PORT);
+    if (listener < 0) {
+        ESP_LOGE(TAG, "OTA listen failed errno=%d", errno);
+        vTaskDelete(NULL);
+    }
+    ESP_LOGI(TAG, "OTA_LISTEN port=%u", ESP_OTA_PORT);
+    for (;;) {
+        int fd = accept(listener, NULL, NULL);
+        if (fd < 0)
+            continue;
+        bool reboot = ota_receive_client(fd);
+        shutdown(fd, SHUT_RDWR);
+        close(fd);
+        if (reboot) {
+            vTaskDelay(pdMS_TO_TICKS(100u));
+            esp_restart();
+        }
+    }
 }
 
 static int udp_bind(uint16_t port)
@@ -130,11 +307,15 @@ static void uplink_udp_sender_task(void *arg)
             __sync_synchronize();
             after = s_uplink_peer_seq;
         } while ((before & 1u) != 0u || before != after);
-        if (address == 0u || count == 0u)
+        if (count == 0u)
+            continue;
+        uint32_t packet_offset = offset;
+        offset += count;
+        if (address == 0u)
             continue;
         const uint32_t magic = 0x3250554bu;
         memcpy(packet, &magic, sizeof(magic));
-        memcpy(packet + 4u, &offset, sizeof(offset));
+        memcpy(packet + 4u, &packet_offset, sizeof(packet_offset));
         struct sockaddr_in peer;
         memset(&peer, 0, sizeof(peer));
         peer.sin_family = AF_INET;
@@ -142,7 +323,6 @@ static void uplink_udp_sender_task(void *arg)
         peer.sin_port = port;
         (void)sendto(s_uplink_udp_fd, packet, count + 8u, 0,
                      (struct sockaddr *)&peer, sizeof(peer));
-        offset += count;
     }
 }
 
@@ -177,50 +357,63 @@ static void mic_server_task(void *arg)
     }
 }
 
-typedef struct console_writer_context {
-    int fd;
-} console_writer_context_t;
-
-static void console_writer_task(void *arg)
-{
-    console_writer_context_t *context = (console_writer_context_t *)arg;
-    uint8_t output[512];
-    for (;;) {
-        size_t count = xStreamBufferReceive(s_streams.console_tx, output,
-                                            sizeof(output), portMAX_DELAY);
-        if (count != 0u && send_all(context->fd, output, count) != 0) {
-            shutdown(context->fd, SHUT_RDWR);
-            vTaskSuspend(NULL);
-        }
-    }
-}
-
 static void console_client(int fd)
 {
     static const char banner[] =
         "K210 console over WiFi/SPI. Type 'help'.\r\n";
     (void)send_all(fd, banner, sizeof(banner) - 1u);
     char diagnostic[384];
+    int reset_length = snprintf(diagnostic, sizeof(diagnostic),
+                                "ESP reset=%d free_heap=%lu console_err=%d/%lu recv_err=%d\r\n",
+                                (int)esp_reset_reason(),
+                                (unsigned long)esp_get_free_heap_size(),
+                                s_console_send_errno,
+                                (unsigned long)s_console_send_count,
+                                s_console_recv_errno);
+    if (reset_length > 0)
+        (void)send_all(fd, diagnostic, (size_t)reset_length);
     size_t diagnostic_length =
         kstream_master_diag(diagnostic, sizeof(diagnostic));
     if (diagnostic_length != 0u)
         (void)send_all(fd, diagnostic, diagnostic_length);
-    console_writer_context_t writer_context = {fd};
-    TaskHandle_t writer = NULL;
-    if (xTaskCreate(console_writer_task, "console_tx", 2048u,
-                    &writer_context, 9u, &writer) != pdPASS)
-        return;
     uint8_t input[256];
+    uint8_t output[512];
     for (;;) {
-        int count = recv(fd, input, sizeof(input), 0);
-        if (count <= 0)
+        size_t output_count = xStreamBufferReceive(
+            s_streams.console_tx, output, sizeof(output), 0u);
+        if (output_count != 0u && send_all(fd, output, output_count) != 0) {
+            s_console_send_errno = errno;
+            s_console_send_count = output_count;
             break;
+        }
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(fd, &readable);
+        struct timeval poll = {0, 10000};
+        int selected = select(fd + 1, &readable, NULL, NULL, &poll);
+        if (selected == 0)
+            continue;
+        if (selected < 0)
+            break;
+        int count = recv(fd, input, sizeof(input), 0);
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            fd_set readable;
+            FD_ZERO(&readable);
+            FD_SET(fd, &readable);
+            if (select(fd + 1, &readable, NULL, NULL, NULL) > 0)
+                continue;
+        }
+        if (count <= 0) {
+            s_console_recv_errno = count < 0 ? errno : 0;
+            break;
+        }
         if (xStreamBufferSend(s_streams.console_rx, input, count,
                               portMAX_DELAY) != (size_t)count)
             abort();
     }
     shutdown(fd, SHUT_RDWR);
-    vTaskDelete(writer);
 }
 
 static void console_server_task(void *arg)
@@ -236,6 +429,9 @@ static void console_server_task(void *arg)
         int fd = accept(listener, NULL, NULL);
         if (fd < 0)
             continue;
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0)
+            (void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
         ESP_LOGI(TAG, "CONSOLE_CONNECTED");
         console_client(fd);
         close(fd);
@@ -321,4 +517,6 @@ void app_main(void)
     xTaskCreate(audio_server_task, "audio_tcp", 3072, NULL, 9, NULL);
     xTaskCreate(mic_server_task, "mic_tcp", 3072, NULL, 9, NULL);
     xTaskCreate(console_server_task, "console_tcp", 3072, NULL, 9, NULL);
+    if (xTaskCreate(ota_server_task, "esp_ota", 3072, NULL, 10, NULL) != pdPASS)
+        abort();
 }

@@ -36,9 +36,20 @@ grep -q '^CONFIG_ESP8266_HSPI_HIGH_THROUGHPUT=y$' sdkconfig
 grep -q '^CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=y$' sdkconfig
 grep -q '^# CONFIG_ESP8266_WIFI_NVS_ENABLED is not set$' sdkconfig
 grep -q '^CONFIG_PARTITION_TABLE_CUSTOM=y$' sdkconfig
-grep -q '^CONFIG_PARTITION_TABLE_FILENAME="partitions_1mb_singleapp.csv"$' sdkconfig
+grep -q '^CONFIG_PARTITION_TABLE_FILENAME="partitions_1mb_ota.csv"$' sdkconfig
 
-make -j"${NUMBER_OF_PROCESSORS:-4}"
+make clean
+make ota -j"${NUMBER_OF_PROCESSORS:-4}"
+make blank_ota_data
 
-test -f "build/esp8285-sta-klink.bin"
-echo "ESP_BUILD_OK $PROJECT/build/esp8285-sta-klink.bin"
+test -f "build/esp8285-sta-klink.ota.bin"
+test -f "build/ota_data_initial.bin"
+python - <<'PY'
+from pathlib import Path
+
+app1 = Path("build/esp8285-sta-klink.app1.bin").read_bytes()
+app2 = Path("build/esp8285-sta-klink.app2.bin").read_bytes()
+if len(app1) != len(app2) or app1[:8] == app2[:8]:
+    raise SystemExit("invalid OTA build: app1/app2 link images are not distinct")
+PY
+echo "ESP_BUILD_OK $PROJECT/build/esp8285-sta-klink.ota.bin"
