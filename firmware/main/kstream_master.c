@@ -1,17 +1,22 @@
 #include "kstream_master.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "driver/spi.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp8266/eagle_soc.h"
+#include "esp8266/pin_mux_register.h"
 #include "freertos/task.h"
 
 #include "kstream_v2.h"
 
 #define KSTREAM_READY_GPIO GPIO_NUM_0
+#define KSTREAM_MASTER_PHASE_GPIO GPIO_NUM_3
+#define KSTREAM_CS_GPIO GPIO_NUM_15
 
 static const char *TAG = "kstream-spi";
 static kstream_master_buffers_t *s_buffers;
@@ -19,7 +24,33 @@ static uint32_t s_sequence;
 static uint32_t s_faults;
 static TaskHandle_t s_transport_task;
 static uint32_t s_ready_level = 1u;
+static volatile uint32_t s_diag_stage;
+static volatile uint32_t s_diag_got_crc;
+static volatile uint32_t s_diag_calculated_crc;
+static uint64_t s_diag_push_bytes;
+static uint64_t s_diag_pull_bytes;
+static uint32_t s_diag_response_words[KSTREAM_V2_FRAME_BYTES / 4u];
 static uint8_t s_burst[KSTREAM_V2_BURST_BYTES] __attribute__((aligned(4)));
+
+static void master_phase_init(void)
+{
+    PIN_FUNC_SELECT(PERIPHS_IO_MUX_U0RXD_U, FUNC_GPIO3);
+    ESP_ERROR_CHECK(gpio_set_level(KSTREAM_MASTER_PHASE_GPIO, 1u));
+    ESP_ERROR_CHECK(gpio_set_direction(KSTREAM_MASTER_PHASE_GPIO,
+                                       GPIO_MODE_OUTPUT));
+}
+
+static void master_phase_set(uint32_t level)
+{
+    ESP_ERROR_CHECK(gpio_set_level(KSTREAM_MASTER_PHASE_GPIO, level));
+}
+
+static void master_cs_init(void)
+{
+    PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDO_U, FUNC_GPIO15);
+    ESP_ERROR_CHECK(gpio_set_level(KSTREAM_CS_GPIO, 1u));
+    ESP_ERROR_CHECK(gpio_set_direction(KSTREAM_CS_GPIO, GPIO_MODE_OUTPUT));
+}
 
 static void IRAM_ATTR ready_gpio_isr(void *arg)
 {
@@ -55,6 +86,9 @@ static void ready_gpio_init(void)
 static void spi_transfer(bool read, void *buffer, size_t length)
 {
     uint8_t *bytes = (uint8_t *)buffer;
+    uint8_t *start = bytes;
+    size_t total = length;
+    ESP_ERROR_CHECK(gpio_set_level(KSTREAM_CS_GPIO, 0u));
     while (length != 0u) {
         size_t count = length > 64u ? 64u : length;
         spi_trans_t trans;
@@ -70,15 +104,55 @@ static void spi_transfer(bool read, void *buffer, size_t length)
         bytes += count;
         length -= count;
     }
+
+    uint32_t guard[2] = {UINT32_MAX, UINT32_MAX};
+    spi_trans_t trans;
+    memset(&trans, 0, sizeof(trans));
+    if (read) {
+        trans.miso = guard;
+        trans.bits.miso = 32u;
+    } else {
+        trans.mosi = guard;
+        trans.bits.mosi = 64u;
+    }
+    ESP_ERROR_CHECK(spi_trans(HSPI_HOST, &trans));
+    ESP_ERROR_CHECK(gpio_set_level(KSTREAM_CS_GPIO, 1u));
+    if (read) {
+        memmove(start, start + sizeof(uint32_t), total - sizeof(uint32_t));
+        memcpy(start + total - sizeof(uint32_t), guard, sizeof(uint32_t));
+    }
 }
 
-static void master_int_complete(void)
+static void master_write_complete(void)
 {
-    static uint32_t low __attribute__((aligned(4))) = 0x00000000u;
-    static uint32_t high __attribute__((aligned(4))) = 0xffffffffu;
+    master_phase_set(0u);
     ready_wait_next();
-    spi_transfer(false, &low, sizeof(low));
-    spi_transfer(false, &high, sizeof(high));
+    master_phase_set(1u);
+}
+
+static void master_read_begin(void)
+{
+    s_diag_stage = 3u;
+    if (s_sequence == 1u) ESP_LOGI(TAG, "HS READ_REQUEST");
+    master_phase_set(0u);
+    ready_wait_next();
+    s_diag_stage = 4u;
+    if (s_sequence == 1u) ESP_LOGI(TAG, "HS READ_GRANTED");
+    master_phase_set(1u);
+    ready_wait_next();
+    s_diag_stage = 5u;
+    if (s_sequence == 1u) ESP_LOGI(TAG, "HS READ_ACTIVE");
+}
+
+static void master_read_complete(void)
+{
+    s_diag_stage = 7u;
+    if (s_sequence == 1u) ESP_LOGI(TAG, "HS COMPLETE_REQUEST");
+    master_phase_set(0u);
+    ready_wait_next();
+    s_diag_stage = 8u;
+    if (s_sequence == 1u) ESP_LOGI(TAG, "HS COMPLETE_GRANTED");
+    master_phase_set(1u);
 }
 
 static void command_send(kstream_v2_command_t *command)
@@ -88,11 +162,13 @@ static void command_send(kstream_v2_command_t *command)
     command->sequence = ++s_sequence;
     kstream_v2_command_finalize(command);
     spi_transfer(false, command, sizeof(*command));
+    master_write_complete();
     ready_wait_next();
 }
 
 static void activation_command_send(kstream_v2_command_t *command)
 {
+    s_diag_stage = 100u;
     command->magic = KSTREAM_V2_MAGIC_CMD;
     command->version = KSTREAM_V2_VERSION;
     command->opcode = KSTREAM_V2_OP_ACTIVATE_INT;
@@ -105,19 +181,31 @@ static void activation_command_send(kstream_v2_command_t *command)
     /* K210 has this first RX DMA armed while it holds ESP GPIO0 HIGH.  This
      * descriptor, not elapsed boot time, transfers IO15 to phase signalling. */
     spi_transfer(false, command, sizeof(*command));
+    s_diag_stage = 101u;
+    master_write_complete();
+    s_diag_stage = 102u;
     ready_wait_next();
+    s_diag_stage = 103u;
+    ESP_LOGI(TAG, "HS RESPONSE_ARMED");
 }
 
 static bool response_read(uint32_t sequence, kstream_v2_response_t *response)
 {
     memset(response, 0, sizeof(*response));
+    master_read_begin();
+    s_diag_stage = 6u;
     spi_transfer(true, response, sizeof(*response));
-    master_int_complete();
+    master_read_complete();
+    s_diag_stage = 9u;
     ready_wait_next();
     uint32_t calculated_crc = kstream_v2_crc32(
         response, offsetof(kstream_v2_response_t, crc32));
     if (!kstream_v2_response_valid(response) || response->sequence != sequence ||
         response->result != KSTREAM_V2_RESULT_OK) {
+        s_diag_stage = 0x80000000u;
+        s_diag_got_crc = response->crc32;
+        s_diag_calculated_crc = calculated_crc;
+        memcpy(s_diag_response_words, response, sizeof(s_diag_response_words));
         ++s_faults;
         ESP_LOGE(TAG,
                  "response fault want_seq=%lu got_seq=%lu magic=%08lx ver=%u result=%u crc=%08lx calc=%08lx faults=%lu",
@@ -172,9 +260,11 @@ static size_t push(uint8_t stream, StreamBufferHandle_t source, uint32_t credit,
     command.arg0 = (uint32_t)wire_count;
     command_send(&command);
     spi_transfer(false, s_burst, wire_count);
+    master_write_complete();
     ready_wait_next();
     if (!response_read(command.sequence, status))
         return 0u;
+    s_diag_push_bytes += count;
     return count;
 }
 
@@ -198,13 +288,15 @@ static size_t pull(uint8_t stream, StreamBufferHandle_t destination,
     command.length = (uint32_t)count;
     command.arg0 = (uint32_t)count;
     command_send(&command);
+    master_read_begin();
     spi_transfer(true, s_burst, count);
-    master_int_complete();
+    master_read_complete();
     ready_wait_next();
     if (!response_read(command.sequence, status))
         return 0u;
     if (xStreamBufferSend(destination, s_burst, count, 0) != count)
         abort();
+    s_diag_pull_bytes += count;
     return count;
 }
 
@@ -215,9 +307,10 @@ static void spi_init_master(void)
     config.interface.val = SPI_DEFAULT_INTERFACE;
     config.interface.byte_tx_order = SPI_BYTE_ORDER_MSB_FIRST;
     config.interface.byte_rx_order = SPI_BYTE_ORDER_MSB_FIRST;
+    config.interface.cs_en = 0u;
     config.intr_enable.val = SPI_MASTER_DEFAULT_INTR_ENABLE;
     config.mode = SPI_MASTER_MODE;
-    config.clk_div = SPI_40MHz_DIV;
+    config.clk_div = SPI_20MHz_DIV;
     config.event_cb = NULL;
     ESP_ERROR_CHECK(spi_init(HSPI_HOST, &config));
 }
@@ -227,8 +320,10 @@ static void transport_task(void *arg)
     (void)arg;
     s_transport_task = xTaskGetCurrentTaskHandle();
     ready_gpio_init();
+    master_phase_init();
     spi_init_master();
-    ESP_LOGI(TAG, "MASTER clock=40MHz burst=%u ready=GPIO0 edge ack=MOSI low-high",
+    master_cs_init();
+    ESP_LOGI(TAG, "MASTER clock=20MHz burst=%u ready=GPIO0 phase=GPIO3",
              (unsigned)KSTREAM_V2_BURST_BYTES);
 
     kstream_v2_response_t status;
@@ -246,6 +341,7 @@ static void transport_task(void *arg)
         vTaskDelete(NULL);
     }
     ESP_LOGI(TAG, "LINK_UP peer=%.*s", (int)sizeof(status.message), status.message);
+    s_diag_stage = 10u;
 
     for (;;) {
         bool worked = false;
@@ -267,9 +363,13 @@ static void transport_task(void *arg)
         moved = push(KSTREAM_V2_STREAM_CONSOLE_RX, s_buffers->console_rx,
                      status.console_rx_free, &status);
         worked |= moved != 0u;
-        moved = push(KSTREAM_V2_STREAM_DOWNLINK, s_buffers->downlink,
-                     status.downlink_free, &status);
-        worked |= moved != 0u;
+        for (unsigned i = 0; i < 3u; ++i) {
+            moved = push(KSTREAM_V2_STREAM_DOWNLINK, s_buffers->downlink,
+                         status.downlink_free, &status);
+            worked |= moved != 0u;
+            if (moved == 0u)
+                break;
+        }
 
         /* Every completed PUSH/PULL returns the next credits in its mandatory
          * response header.  STATUS is only the idle refresh for data produced
@@ -288,4 +388,35 @@ void kstream_master_start(kstream_master_buffers_t *buffers)
 {
     s_buffers = buffers;
     xTaskCreate(transport_task, "kstream_spi", 4096, NULL, 8, NULL);
+}
+
+size_t kstream_master_diag(char *buffer, size_t size)
+{
+    int length = snprintf(
+        buffer, size,
+        "SPI stage=%lu faults=%lu push=%lu pull=%lu crc=%08lx/%08lx words="
+        "%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,"
+        "%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,%08lx\r\n",
+        (unsigned long)s_diag_stage, (unsigned long)s_faults,
+        (unsigned long)s_diag_push_bytes,
+        (unsigned long)s_diag_pull_bytes,
+        (unsigned long)s_diag_got_crc,
+        (unsigned long)s_diag_calculated_crc,
+        (unsigned long)s_diag_response_words[0],
+        (unsigned long)s_diag_response_words[1],
+        (unsigned long)s_diag_response_words[2],
+        (unsigned long)s_diag_response_words[3],
+        (unsigned long)s_diag_response_words[4],
+        (unsigned long)s_diag_response_words[5],
+        (unsigned long)s_diag_response_words[6],
+        (unsigned long)s_diag_response_words[7],
+        (unsigned long)s_diag_response_words[8],
+        (unsigned long)s_diag_response_words[9],
+        (unsigned long)s_diag_response_words[10],
+        (unsigned long)s_diag_response_words[11],
+        (unsigned long)s_diag_response_words[12],
+        (unsigned long)s_diag_response_words[13],
+        (unsigned long)s_diag_response_words[14],
+        (unsigned long)s_diag_response_words[15]);
+    return length > 0 && (size_t)length < size ? (size_t)length : 0u;
 }
