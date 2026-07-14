@@ -9,6 +9,7 @@ from pathlib import Path
 
 MAGIC = 0x41544F45
 FLAG_DUAL = 1
+COMMIT_ACK = 0x4B43414F
 PORT = 21001
 
 
@@ -43,6 +44,8 @@ def main():
         sock.sendall(header)
         magic, result, received, detail = struct.unpack(
             "<IIII", recv_exact(sock, 16))
+        if magic == MAGIC and result == 0 and received == len(payload):
+            sock.sendall(struct.pack("<I", COMMIT_ACK))
         if magic != MAGIC or result != 0xFFFFFFFF:
             raise RuntimeError(
                 f"OTA prepare failed result={result} detail=0x{detail:08x}")

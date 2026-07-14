@@ -23,9 +23,9 @@
 #include "kstream_master.h"
 #include "kstream_v2.h"
 
-#define KESP_BUILD_ID       "kesp-master-stream-v2"
-#define KESP_STA_SSID       "ELECTRONICS"
-#define KESP_STA_PASSWORD   "bdc123print"
+#define KESP_BUILD_ID       "kesp-slave-klink-v2"
+#define KESP_STA_SSID       "Fermiums_2.4"
+#define KESP_STA_PASSWORD   "876543212"
 #define DOWNLINK_RING_BYTES 8192u
 #define UPLINK_RING_BYTES   8192u
 #define CONSOLE_RX_BYTES    2048u
@@ -37,6 +37,7 @@
 #define ESP_OTA_FLAG_DUAL   0x00000001u
 #define ESP_OTA_READY       UINT32_MAX
 #define ESP_OTA_PROGRESS    (UINT32_MAX - 1u)
+#define ESP_OTA_COMMIT_ACK  0x4b43414fu
 
 typedef struct __attribute__((packed)) esp_ota_request {
     uint32_t magic;
@@ -184,7 +185,6 @@ static bool ota_receive_client(int fd)
         ota_status_send(fd, 3u, 0u, (uint32_t)error);
         return false;
     }
-    vTaskDelay(1u);
     if (ota_status_send(fd, ESP_OTA_READY, 0u, partition->subtype) != 0) {
         (void)esp_ota_end(handle);
         return false;
@@ -235,8 +235,11 @@ static bool ota_receive_client(int fd)
         ota_status_send(fd, 7u, received, (uint32_t)error);
         return false;
     }
-    ota_status_send(fd, 0u, received, crc);
-    return true;
+    if (ota_status_send(fd, 0u, received, crc) != 0)
+        return false;
+    uint32_t commit_ack = 0u;
+    return recv_all(fd, &commit_ack, sizeof(commit_ack)) == 0 &&
+           commit_ack == ESP_OTA_COMMIT_ACK;
 }
 
 static void ota_server_task(void *arg)
@@ -255,10 +258,8 @@ static void ota_server_task(void *arg)
         bool reboot = ota_receive_client(fd);
         shutdown(fd, SHUT_RDWR);
         close(fd);
-        if (reboot || s_ota_active) {
-            vTaskDelay(pdMS_TO_TICKS(100u));
+        if (reboot || s_ota_active)
             esp_restart();
-        }
     }
 }
 
@@ -490,6 +491,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
         ESP_LOGI(TAG, "STA_ASSOCIATED");
     } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        /* A disconnect is a terminal, observable session fault.  Reconnecting
+         * here used to hide link failures and could leave TCP/KLINK clients
+         * attached to two different Wi-Fi sessions. */
         wifi_event_sta_disconnected_t *event =
             (wifi_event_sta_disconnected_t *)event_data;
         ESP_LOGE(TAG,
@@ -498,7 +502,6 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                  event ? event->bssid[0] : 0u, event ? event->bssid[1] : 0u,
                  event ? event->bssid[2] : 0u, event ? event->bssid[3] : 0u,
                  event ? event->bssid[4] : 0u, event ? event->bssid[5] : 0u);
-        ESP_ERROR_CHECK(esp_wifi_connect());
     } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         s_sta_ip = event->ip_info.ip;

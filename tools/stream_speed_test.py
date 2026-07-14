@@ -60,7 +60,7 @@ def main():
     console_sock = socket.create_connection((args.host, 21012), 5)
     console_sock.settimeout(0.2)
     console = Console(console_sock)
-    console.wait_for(r"SPI stage=\d+")
+    console.wait_for(r"KLINK role=slave active=1")
     uplink.sendto(b"speed", (args.host, 21011))
     registration, _ = uplink.recvfrom(16)
     if registration != b"KUP2":

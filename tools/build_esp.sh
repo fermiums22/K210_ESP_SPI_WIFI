@@ -2,9 +2,9 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SDK="${IDF_PATH:?IDF_PATH is required}"
-SDK_ROOT="${ESP_SDK_ROOT:?ESP_SDK_ROOT is required}"
-PROJECT="${ESP_PROJECT:-$REPO_DIR/firmware}"
+SDK="$(cygpath -u "${IDF_PATH:?IDF_PATH is required}")"
+SDK_ROOT="$(cygpath -u "${ESP_SDK_ROOT:?ESP_SDK_ROOT is required}")"
+PROJECT="$(cygpath -u "${ESP_PROJECT:-$REPO_DIR/firmware}")"
 TOOLCHAIN_BIN="$SDK_ROOT/xtensa-lx106-elf/bin"
 PY_VENV_BIN="$REPO_DIR/.local-tools/esp8266_py/bin"
 PY_SHIMS="$REPO_DIR/tools/python_shims"
@@ -23,9 +23,11 @@ export IDF_PATH="$SDK"
 export IDF_PYTHON_ENV_PATH=""
 
 cd "$PROJECT"
-if [ ! -f sdkconfig ]; then
-    make defconfig
-fi
+# This is a fixed production target, not a menuconfig-driven development
+# build.  Recreate sdkconfig so a stale generated file cannot silently retain
+# an obsolete partition layout, tick rate, flash mode, or Wi-Fi buffers.
+rm -f sdkconfig
+make defconfig
 
 grep -q '^CONFIG_ESPTOOLPY_FLASHMODE="dout"$' sdkconfig
 grep -q '^CONFIG_ESPTOOLPY_FLASHFREQ="40m"$' sdkconfig
