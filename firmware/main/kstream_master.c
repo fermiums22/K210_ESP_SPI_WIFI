@@ -23,6 +23,8 @@ static kstream_master_buffers_t *s_buffers;
 static uint32_t s_sequence;
 static uint32_t s_faults;
 static TaskHandle_t s_transport_task;
+static volatile bool s_quiesce_requested;
+static volatile bool s_quiesced;
 static uint32_t s_ready_level = 1u;
 static volatile uint32_t s_diag_stage;
 static volatile uint32_t s_diag_got_crc;
@@ -81,6 +83,7 @@ static void ready_gpio_init(void)
     ESP_ERROR_CHECK(gpio_install_isr_service(0u));
     ESP_ERROR_CHECK(gpio_isr_handler_add(KSTREAM_READY_GPIO,
                                          ready_gpio_isr, NULL));
+    s_ready_level = (uint32_t)gpio_get_level(KSTREAM_READY_GPIO);
 }
 
 static void spi_transfer(bool read, void *buffer, size_t length)
@@ -189,15 +192,9 @@ static void activation_command_send(kstream_v2_command_t *command)
     ESP_LOGI(TAG, "HS RESPONSE_ARMED");
 }
 
-static bool response_read(uint32_t sequence, kstream_v2_response_t *response)
+static bool response_validate(uint32_t sequence,
+                              kstream_v2_response_t *response)
 {
-    memset(response, 0, sizeof(*response));
-    master_read_begin();
-    s_diag_stage = 6u;
-    spi_transfer(true, response, sizeof(*response));
-    master_read_complete();
-    s_diag_stage = 9u;
-    ready_wait_next();
     uint32_t calculated_crc = kstream_v2_crc32(
         response, offsetof(kstream_v2_response_t, crc32));
     if (!kstream_v2_response_valid(response) || response->sequence != sequence ||
@@ -216,6 +213,18 @@ static bool response_read(uint32_t sequence, kstream_v2_response_t *response)
         return false;
     }
     return true;
+}
+
+static bool response_read(uint32_t sequence, kstream_v2_response_t *response)
+{
+    memset(response, 0, sizeof(*response));
+    master_read_begin();
+    s_diag_stage = 6u;
+    spi_transfer(true, response, sizeof(*response));
+    master_read_complete();
+    s_diag_stage = 9u;
+    ready_wait_next();
+    return response_validate(sequence, response);
 }
 
 static bool query(uint8_t opcode, kstream_v2_response_t *response)
@@ -296,8 +305,9 @@ static size_t pull(uint8_t stream, StreamBufferHandle_t destination,
     spi_transfer(true, s_burst, wire_count);
     master_read_complete();
     ready_wait_next();
-    if (!response_read(command.sequence, status))
+    if (!response_read(command.sequence, status)) {
         return 0u;
+    }
     if (xStreamBufferSend(destination, s_burst, count, 0) != count)
         abort();
     s_diag_pull_bytes += count;
@@ -348,6 +358,12 @@ static void transport_task(void *arg)
     s_diag_stage = 10u;
 
     for (;;) {
+        if (s_quiesce_requested) {
+            s_quiesced = true;
+            __sync_synchronize();
+            for (;;)
+                (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        }
         bool worked = false;
         size_t moved = pull(KSTREAM_V2_STREAM_CONSOLE_TX,
                             s_buffers->console_tx, status.console_tx_used,
@@ -391,7 +407,19 @@ static void transport_task(void *arg)
 void kstream_master_start(kstream_master_buffers_t *buffers)
 {
     s_buffers = buffers;
-    xTaskCreate(transport_task, "kstream_spi", 4096, NULL, 8, NULL);
+    if (xTaskCreate(transport_task, "kstream_spi", 4096, NULL, 8, NULL) !=
+        pdPASS)
+        abort();
+}
+
+void kstream_master_quiesce(void)
+{
+    s_quiesce_requested = true;
+    __sync_synchronize();
+    if (s_transport_task)
+        xTaskNotifyGive(s_transport_task);
+    while (!s_quiesced)
+        vTaskDelay(1u);
 }
 
 size_t kstream_master_diag(char *buffer, size_t size)

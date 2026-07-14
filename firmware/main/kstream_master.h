@@ -15,6 +15,7 @@ typedef struct kstream_master_buffers {
 } kstream_master_buffers_t;
 
 void kstream_master_start(kstream_master_buffers_t *buffers);
+void kstream_master_quiesce(void);
 size_t kstream_master_diag(char *buffer, size_t size);
 
 #endif

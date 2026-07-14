@@ -32,6 +32,7 @@ grep -q '^CONFIG_ESPTOOLPY_FLASHFREQ="40m"$' sdkconfig
 grep -q '^CONFIG_ESPTOOLPY_FLASHSIZE="1MB"$' sdkconfig
 grep -q '^CONFIG_ESP8266_XTAL_FREQ_40=y$' sdkconfig
 grep -q '^CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200$' sdkconfig
+grep -q '^CONFIG_FREERTOS_HZ=1000$' sdkconfig
 grep -q '^CONFIG_ESP8266_HSPI_HIGH_THROUGHPUT=y$' sdkconfig
 grep -q '^CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=y$' sdkconfig
 grep -q '^# CONFIG_ESP8266_WIFI_NVS_ENABLED is not set$' sdkconfig

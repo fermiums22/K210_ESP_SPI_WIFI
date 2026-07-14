@@ -60,6 +60,9 @@ static volatile uint16_t s_uplink_peer_port;
 static volatile int s_console_send_errno;
 static volatile uint32_t s_console_send_count;
 static volatile int s_console_recv_errno;
+static volatile bool s_ota_active;
+static volatile int s_uplink_send_errno;
+static volatile uint32_t s_uplink_send_drops;
 
 static int listener_open(uint16_t port)
 {
@@ -161,6 +164,9 @@ static bool ota_receive_client(int fd)
         ota_status_send(fd, 2u, 0u, partition ? partition->size : 0u);
         return false;
     }
+    s_ota_active = true;
+    __sync_synchronize();
+    kstream_master_quiesce();
     ESP_LOGI(TAG, "OTA_PREPARE slot=%lu bytes=%lu",
              (unsigned long)slot_index, (unsigned long)slot_size);
     esp_ota_handle_t handle;
@@ -240,7 +246,7 @@ static void ota_server_task(void *arg)
         bool reboot = ota_receive_client(fd);
         shutdown(fd, SHUT_RDWR);
         close(fd);
-        if (reboot) {
+        if (reboot || s_ota_active) {
             vTaskDelay(pdMS_TO_TICKS(100u));
             esp_restart();
         }
@@ -278,6 +284,8 @@ static void audio_server_task(void *arg)
         int count = recv(fd, buffer, sizeof(buffer), 0);
         if (count <= 0)
             continue;
+        if (s_ota_active)
+            continue;
         if (xStreamBufferSpacesAvailable(s_streams.downlink) >= (size_t)count &&
             xStreamBufferSend(s_streams.downlink, buffer, count, 0u) !=
                 (size_t)count)
@@ -311,7 +319,7 @@ static void uplink_udp_sender_task(void *arg)
             continue;
         uint32_t packet_offset = offset;
         offset += count;
-        if (address == 0u)
+        if (s_ota_active || address == 0u)
             continue;
         const uint32_t magic = 0x3250554bu;
         memcpy(packet, &magic, sizeof(magic));
@@ -321,8 +329,11 @@ static void uplink_udp_sender_task(void *arg)
         peer.sin_family = AF_INET;
         peer.sin_addr.s_addr = address;
         peer.sin_port = port;
-        (void)sendto(s_uplink_udp_fd, packet, count + 8u, 0,
-                     (struct sockaddr *)&peer, sizeof(peer));
+        if (sendto(s_uplink_udp_fd, packet, count + 8u, 0,
+                   (struct sockaddr *)&peer, sizeof(peer)) < 0) {
+            s_uplink_send_errno = errno;
+            ++s_uplink_send_drops;
+        }
     }
 }
 
@@ -334,12 +345,17 @@ static void mic_server_task(void *arg)
         ESP_LOGE(TAG, "mic UDP bind failed errno=%d", errno);
         vTaskDelete(NULL);
     }
-    if (xTaskCreate(uplink_udp_sender_task, "uplink_udp", 2048u, NULL, 9u,
+    if (xTaskCreate(uplink_udp_sender_task, "uplink_udp", 2048u, NULL, 8u,
                     NULL) != pdPASS)
         abort();
     ESP_LOGI(TAG, "UPLINK_UDP port=%u", KSTREAM_V2_PORT_UPLINK);
     uint8_t registration[16];
     for (;;) {
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(s_uplink_udp_fd, &readable);
+        if (select(s_uplink_udp_fd + 1, &readable, NULL, NULL, NULL) <= 0)
+            continue;
         struct sockaddr_in peer;
         socklen_t peer_length = sizeof(peer);
         int count = recvfrom(s_uplink_udp_fd, registration,
@@ -347,12 +363,18 @@ static void mic_server_task(void *arg)
                              (struct sockaddr *)&peer, &peer_length);
         if (count <= 0)
             continue;
+        if (s_ota_active)
+            continue;
         ++s_uplink_peer_seq;
         __sync_synchronize();
         s_uplink_peer_addr = peer.sin_addr.s_addr;
         s_uplink_peer_port = peer.sin_port;
         __sync_synchronize();
         ++s_uplink_peer_seq;
+        static const char acknowledgement[] = "KUP2";
+        (void)sendto(s_uplink_udp_fd, acknowledgement,
+                     sizeof(acknowledgement) - 1u, 0,
+                     (struct sockaddr *)&peer, peer_length);
         ESP_LOGI(TAG, "UPLINK_UDP_PEER");
     }
 }
@@ -364,12 +386,14 @@ static void console_client(int fd)
     (void)send_all(fd, banner, sizeof(banner) - 1u);
     char diagnostic[384];
     int reset_length = snprintf(diagnostic, sizeof(diagnostic),
-                                "ESP reset=%d free_heap=%lu console_err=%d/%lu recv_err=%d\r\n",
+                                "ESP reset=%d free_heap=%lu console_err=%d/%lu recv_err=%d udp_drop=%lu/%d\r\n",
                                 (int)esp_reset_reason(),
                                 (unsigned long)esp_get_free_heap_size(),
                                 s_console_send_errno,
                                 (unsigned long)s_console_send_count,
-                                s_console_recv_errno);
+                                s_console_recv_errno,
+                                (unsigned long)s_uplink_send_drops,
+                                s_uplink_send_errno);
     if (reset_length > 0)
         (void)send_all(fd, diagnostic, (size_t)reset_length);
     size_t diagnostic_length =
@@ -379,6 +403,8 @@ static void console_client(int fd)
     uint8_t input[256];
     uint8_t output[512];
     for (;;) {
+        if (s_ota_active)
+            break;
         size_t output_count = xStreamBufferReceive(
             s_streams.console_tx, output, sizeof(output), 0u);
         if (output_count != 0u && send_all(fd, output, output_count) != 0) {
@@ -429,6 +455,10 @@ static void console_server_task(void *arg)
         int fd = accept(listener, NULL, NULL);
         if (fd < 0)
             continue;
+        if (s_ota_active) {
+            close(fd);
+            continue;
+        }
         int flags = fcntl(fd, F_GETFL, 0);
         if (flags >= 0)
             (void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
@@ -514,9 +544,9 @@ void app_main(void)
         abort();
 
     wifi_start_sta();
-    xTaskCreate(audio_server_task, "audio_tcp", 3072, NULL, 9, NULL);
-    xTaskCreate(mic_server_task, "mic_tcp", 3072, NULL, 9, NULL);
-    xTaskCreate(console_server_task, "console_tcp", 3072, NULL, 9, NULL);
-    if (xTaskCreate(ota_server_task, "esp_ota", 3072, NULL, 10, NULL) != pdPASS)
+    xTaskCreate(audio_server_task, "audio_tcp", 3072, NULL, 8, NULL);
+    xTaskCreate(mic_server_task, "mic_tcp", 3072, NULL, 8, NULL);
+    xTaskCreate(console_server_task, "console_tcp", 3072, NULL, 8, NULL);
+    if (xTaskCreate(ota_server_task, "esp_ota", 3072, NULL, 11, NULL) != pdPASS)
         abort();
 }

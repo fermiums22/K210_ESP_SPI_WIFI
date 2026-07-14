@@ -46,6 +46,8 @@ def main():
     parser = argparse.ArgumentParser(description="K210 WiFi stream speed test")
     parser.add_argument("host", nargs="?", default="192.168.0.105")
     parser.add_argument("--seconds", type=float, default=5.0)
+    parser.add_argument("--uplink", type=int, default=1500000,
+                        help="required uplink rate in bit/s")
     parser.add_argument("--downlink", type=int, default=500000,
                         help="downlink rate in bit/s")
     args = parser.parse_args()
@@ -54,12 +56,15 @@ def main():
     uplink.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
     uplink.bind(("", 0))
     uplink.settimeout(0.1)
-    uplink.sendto(b"speed", (args.host, 21011))
 
     console_sock = socket.create_connection((args.host, 21012), 5)
     console_sock.settimeout(0.2)
     console = Console(console_sock)
     console.wait_for(r"SPI stage=\d+")
+    uplink.sendto(b"speed", (args.host, 21011))
+    registration, _ = uplink.recvfrom(16)
+    if registration != b"KUP2":
+        raise RuntimeError(f"invalid uplink registration: {registration!r}")
     status_pattern = r"status down=.*?\bderr=\d+"
     baseline_status = console.command("status", status_pattern)
     baseline_rx = int(re.search(r"\brx=(\d+)", baseline_status).group(1))
@@ -93,9 +98,11 @@ def main():
 
     drain_deadline = time.monotonic() + 5.0
     delivered = 0
-    while delivered < sent and time.monotonic() < drain_deadline:
+    down_used = 1
+    while down_used != 0 and time.monotonic() < drain_deadline:
         status = console.command("status", status_pattern)
         delivered = int(re.search(r"\brx=(\d+)", status).group(1)) - baseline_rx
+        down_used = int(re.search(r"status down=(\d+)/", status).group(1))
 
     down_status = console.command(
         "bench down off",
@@ -133,15 +140,22 @@ def main():
     down_received, down_corrupt = map(int, match.groups())
     down_loss = max(0, sent - down_received)
 
+    source_rate = source * 8 / args.seconds
+    uplink_rate = received * 8 / args.seconds
+    downlink_rate = down_received * 8 / elapsed
     print(down_status)
-    print(f"uplink: source {source * 8 / args.seconds / 1e6:.3f} Mb/s, "
-          f"received {received * 8 / args.seconds / 1e6:.3f} Mb/s, "
+    print(f"uplink: target {args.uplink / 1e6:.3f} Mb/s, "
+          f"source {source_rate / 1e6:.3f} Mb/s, "
+          f"received {uplink_rate / 1e6:.3f} Mb/s, "
           f"gaps {gaps}, corrupt {corrupt}")
-    print(f"downlink: sent {sent * 8 / elapsed / 1e6:.3f} Mb/s, "
-          f"delivered {down_received * 8 / elapsed / 1e6:.3f} Mb/s, "
+    print(f"downlink: target {args.downlink / 1e6:.3f} Mb/s, "
+          f"sent {sent * 8 / elapsed / 1e6:.3f} Mb/s, "
+          f"delivered {downlink_rate / 1e6:.3f} Mb/s, "
           f"loss {down_loss * 100 / sent:.2f}%, corrupt {down_corrupt}")
 
-    passed = received > 0 and corrupt == 0 and down_loss == 0 and down_corrupt == 0
+    passed = (uplink_rate >= args.uplink * 0.95 and
+              downlink_rate >= args.downlink * 0.95 and
+              corrupt == 0 and down_corrupt == 0)
     print(f"RESULT: {'PASS' if passed else 'FAIL'}")
     if not passed:
         sys.exit(1)
