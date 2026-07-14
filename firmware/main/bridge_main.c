@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -65,7 +66,8 @@ static volatile int s_console_recv_errno;
 static volatile int s_update_close_reason;
 static volatile int s_update_close_errno;
 static volatile uint32_t s_update_recv_bytes;
-static uint8_t s_update_input[512];
+static volatile uint32_t s_update_session_counter;
+static uint8_t s_update_input[KSTREAM_V2_UPDATE_DATA_BYTES];
 static uint8_t s_update_output[128];
 static volatile bool s_ota_active;
 static volatile int s_uplink_send_errno;
@@ -509,17 +511,85 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     }
 }
 
+static void stream_send_exact(StreamBufferHandle_t stream, const void *data,
+                              size_t length)
+{
+    const uint8_t *source = (const uint8_t *)data;
+    while (length != 0u) {
+        size_t count = xStreamBufferSend(stream, source, length, portMAX_DELAY);
+        source += count;
+        length -= count;
+    }
+}
+
+static void stream_receive_exact(StreamBufferHandle_t stream, void *data,
+                                 size_t length)
+{
+    uint8_t *destination = (uint8_t *)data;
+    while (length != 0u) {
+        size_t count = xStreamBufferReceive(stream, destination, length,
+                                            portMAX_DELAY);
+        destination += count;
+        length -= count;
+    }
+}
+
+static void update_send_record(uint32_t session, uint8_t type,
+                               const void *data, uint16_t length)
+{
+    kstream_v2_update_record_t record;
+    memset(&record, 0, sizeof(record));
+    record.magic = KSTREAM_V2_UPDATE_RECORD_MAGIC;
+    record.session = session;
+    record.length = length;
+    record.type = type;
+    record.crc32 = kstream_v2_crc32(
+        &record, offsetof(kstream_v2_update_record_t, crc32));
+    stream_send_exact(s_streams.update_rx, &record, sizeof(record));
+    if (length != 0u)
+        stream_send_exact(s_streams.update_rx, data, length);
+}
+
+static bool update_forward_status(int fd, uint32_t session)
+{
+    if (xStreamBufferBytesAvailable(s_streams.update_tx) <
+        sizeof(kstream_v2_update_record_t))
+        return true;
+
+    kstream_v2_update_record_t record;
+    stream_receive_exact(s_streams.update_tx, &record, sizeof(record));
+    uint32_t crc = kstream_v2_crc32(
+        &record, offsetof(kstream_v2_update_record_t, crc32));
+    if (record.magic != KSTREAM_V2_UPDATE_RECORD_MAGIC ||
+        record.reserved != 0u || record.type != KSTREAM_V2_UPDATE_STATUS ||
+        record.length > sizeof(s_update_output) || record.crc32 != crc) {
+        s_update_close_reason = 6;
+        s_update_close_errno = 0;
+        return false;
+    }
+    if (record.length != 0u)
+        stream_receive_exact(s_streams.update_tx, s_update_output,
+                             record.length);
+    if (record.session != session)
+        return true;
+    if (send_all(fd, s_update_output, record.length) != 0) {
+        s_update_close_reason = 1;
+        s_update_close_errno = errno;
+        return false;
+    }
+    return true;
+}
+
 static void update_client(int fd)
 {
+    uint32_t session = ++s_update_session_counter;
+    if (session == 0u)
+        session = ++s_update_session_counter;
+    update_send_record(session, KSTREAM_V2_UPDATE_BEGIN, NULL, 0u);
+
     for (;;) {
-        size_t output_count = xStreamBufferReceive(
-            s_streams.update_tx, s_update_output, sizeof(s_update_output), 0u);
-        if (output_count != 0u &&
-            send_all(fd, s_update_output, output_count) != 0) {
-            s_update_close_reason = 1;
-            s_update_close_errno = errno;
+        if (!update_forward_status(fd, session))
             break;
-        }
 
         fd_set readable;
         FD_ZERO(&readable);
@@ -546,12 +616,10 @@ static void update_client(int fd)
             break;
         }
         s_update_recv_bytes += (uint32_t)count;
-        if (xStreamBufferSend(s_streams.update_rx, s_update_input, (size_t)count,
-                              portMAX_DELAY) != (size_t)count) {
-            s_update_close_reason = 5;
-            abort();
-        }
+        update_send_record(session, KSTREAM_V2_UPDATE_DATA, s_update_input,
+                           (uint16_t)count);
     }
+    update_send_record(session, KSTREAM_V2_UPDATE_ABORT, NULL, 0u);
     shutdown(fd, SHUT_RDWR);
 }
 
@@ -626,7 +694,9 @@ void app_main(void)
     xTaskCreate(audio_server_task, "audio_tcp", 3072, NULL, 8, NULL);
     xTaskCreate(mic_server_task, "mic_tcp", 3072, NULL, 8, NULL);
     xTaskCreate(console_server_task, "console_tcp", 3072, NULL, 8, NULL);
-    xTaskCreate(update_server_task, "k210_ota", 1536, NULL, 9, NULL);
+    if (xTaskCreate(update_server_task, "k210_ota", 2048, NULL, 9, NULL) !=
+        pdPASS)
+        abort();
     if (xTaskCreate(ota_server_task, "esp_ota", 3072, NULL, 11, NULL) != pdPASS)
         abort();
 }
