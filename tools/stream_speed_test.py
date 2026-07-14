@@ -106,7 +106,7 @@ def main():
 
     down_status = console.command(
         "bench down off",
-        r"downlink benchmark disabled bytes=\d+ errors=\d+")
+        r"downlink benchmark disabled bytes=\d+ skipped=\d+ errors=\d+")
     print(console.command("bench off", "uplink benchmark disabled"))
     console_sock.close()
     downlink.close()
@@ -134,10 +134,10 @@ def main():
             corrupt += 1
 
     source = 0 if first_offset is None else last_offset - first_offset
-    match = re.search(r"bytes=(\d+) errors=(\d+)", down_status)
+    match = re.search(r"bytes=(\d+) skipped=(\d+) errors=(\d+)", down_status)
     if not match:
         raise RuntimeError(f"invalid downlink result: {down_status}")
-    down_received, down_corrupt = map(int, match.groups())
+    down_received, down_skipped, down_corrupt = map(int, match.groups())
     down_loss = max(0, sent - down_received)
 
     source_rate = source * 8 / args.seconds
@@ -151,7 +151,8 @@ def main():
     print(f"downlink: target {args.downlink / 1e6:.3f} Mb/s, "
           f"sent {sent * 8 / elapsed / 1e6:.3f} Mb/s, "
           f"delivered {downlink_rate / 1e6:.3f} Mb/s, "
-          f"loss {down_loss * 100 / sent:.2f}%, corrupt {down_corrupt}")
+          f"loss {down_loss * 100 / sent:.2f}%, "
+          f"skipped {down_skipped}, corrupt {down_corrupt}")
 
     passed = (uplink_rate >= args.uplink * 0.95 and
               downlink_rate >= args.downlink * 0.95 and

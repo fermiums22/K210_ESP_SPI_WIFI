@@ -25,7 +25,6 @@ static uint32_t s_faults;
 static TaskHandle_t s_transport_task;
 static volatile bool s_quiesce_requested;
 static volatile bool s_quiesced;
-static uint32_t s_ready_level = 1u;
 static volatile uint32_t s_diag_stage;
 static volatile uint32_t s_diag_got_crc;
 static volatile uint32_t s_diag_calculated_crc;
@@ -45,6 +44,8 @@ static void master_phase_init(void)
 static void master_phase_set(uint32_t level)
 {
     ESP_ERROR_CHECK(gpio_set_level(KSTREAM_MASTER_PHASE_GPIO, level));
+    while ((uint32_t)gpio_get_level(KSTREAM_MASTER_PHASE_GPIO) != level)
+        taskYIELD();
 }
 
 static void master_cs_init(void)
@@ -64,11 +65,10 @@ static void IRAM_ATTR ready_gpio_isr(void *arg)
         portYIELD_FROM_ISR();
 }
 
-static void ready_wait_next(void)
+static void ready_wait_level(uint32_t expected)
 {
-    while ((uint32_t)gpio_get_level(KSTREAM_READY_GPIO) == s_ready_level)
+    while ((uint32_t)gpio_get_level(KSTREAM_READY_GPIO) != expected)
         (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    s_ready_level ^= 1u;
 }
 
 static void ready_gpio_init(void)
@@ -83,7 +83,6 @@ static void ready_gpio_init(void)
     ESP_ERROR_CHECK(gpio_install_isr_service(0u));
     ESP_ERROR_CHECK(gpio_isr_handler_add(KSTREAM_READY_GPIO,
                                          ready_gpio_isr, NULL));
-    s_ready_level = (uint32_t)gpio_get_level(KSTREAM_READY_GPIO);
 }
 
 static void spi_transfer(bool read, void *buffer, size_t length)
@@ -129,22 +128,17 @@ static void spi_transfer(bool read, void *buffer, size_t length)
 static void master_write_complete(void)
 {
     master_phase_set(0u);
-    ready_wait_next();
+    ready_wait_level(0u);
     master_phase_set(1u);
 }
 
 static void master_read_begin(void)
 {
     s_diag_stage = 3u;
-    if (s_sequence == 1u) ESP_LOGI(TAG, "HS READ_REQUEST");
-    master_phase_set(0u);
-    ready_wait_next();
-    s_diag_stage = 4u;
-    if (s_sequence == 1u) ESP_LOGI(TAG, "HS READ_GRANTED");
-    master_phase_set(1u);
-    ready_wait_next();
+    if (s_sequence == 1u) ESP_LOGI(TAG, "HS DMA_WAIT");
+    ready_wait_level(1u);
     s_diag_stage = 5u;
-    if (s_sequence == 1u) ESP_LOGI(TAG, "HS READ_ACTIVE");
+    if (s_sequence == 1u) ESP_LOGI(TAG, "HS DMA_READY");
 }
 
 static void master_read_complete(void)
@@ -152,7 +146,7 @@ static void master_read_complete(void)
     s_diag_stage = 7u;
     if (s_sequence == 1u) ESP_LOGI(TAG, "HS COMPLETE_REQUEST");
     master_phase_set(0u);
-    ready_wait_next();
+    ready_wait_level(0u);
     s_diag_stage = 8u;
     if (s_sequence == 1u) ESP_LOGI(TAG, "HS COMPLETE_GRANTED");
     master_phase_set(1u);
@@ -164,9 +158,9 @@ static void command_send(kstream_v2_command_t *command)
     command->version = KSTREAM_V2_VERSION;
     command->sequence = ++s_sequence;
     kstream_v2_command_finalize(command);
+    ready_wait_level(1u);
     spi_transfer(false, command, sizeof(*command));
     master_write_complete();
-    ready_wait_next();
 }
 
 static void activation_command_send(kstream_v2_command_t *command)
@@ -175,8 +169,8 @@ static void activation_command_send(kstream_v2_command_t *command)
     command->magic = KSTREAM_V2_MAGIC_CMD;
     command->version = KSTREAM_V2_VERSION;
     command->opcode = KSTREAM_V2_OP_ACTIVATE_INT;
-    command->flags = KSTREAM_V2_INT_MODE_TOGGLE;
-    command->arg0 = KSTREAM_V2_INT_EVENT_PHASE_ARMED;
+    command->flags = KSTREAM_V2_INT_MODE_LEVEL;
+    command->arg0 = KSTREAM_V2_INT_EVENT_DMA_READY;
     command->arg1 = KSTREAM_V2_INT_BOOT_LEVEL_HIGH;
     command->sequence = ++s_sequence;
     kstream_v2_command_finalize(command);
@@ -187,7 +181,7 @@ static void activation_command_send(kstream_v2_command_t *command)
     s_diag_stage = 101u;
     master_write_complete();
     s_diag_stage = 102u;
-    ready_wait_next();
+    ready_wait_level(1u);
     s_diag_stage = 103u;
     ESP_LOGI(TAG, "HS RESPONSE_ARMED");
 }
@@ -223,7 +217,6 @@ static bool response_read(uint32_t sequence, kstream_v2_response_t *response)
     spi_transfer(true, response, sizeof(*response));
     master_read_complete();
     s_diag_stage = 9u;
-    ready_wait_next();
     return response_validate(sequence, response);
 }
 
@@ -268,9 +261,9 @@ static size_t push(uint8_t stream, StreamBufferHandle_t source, uint32_t credit,
     command.length = (uint32_t)count;
     command.arg0 = (uint32_t)wire_count;
     command_send(&command);
+    ready_wait_level(1u);
     spi_transfer(false, s_burst, wire_count);
     master_write_complete();
-    ready_wait_next();
     if (!response_read(command.sequence, status))
         return 0u;
     s_diag_push_bytes += count;
@@ -304,7 +297,6 @@ static size_t pull(uint8_t stream, StreamBufferHandle_t destination,
     master_read_begin();
     spi_transfer(true, s_burst, wire_count);
     master_read_complete();
-    ready_wait_next();
     if (!response_read(command.sequence, status)) {
         return 0u;
     }
@@ -324,7 +316,7 @@ static void spi_init_master(void)
     config.interface.cs_en = 0u;
     config.intr_enable.val = SPI_MASTER_DEFAULT_INTR_ENABLE;
     config.mode = SPI_MASTER_MODE;
-    config.clk_div = SPI_20MHz_DIV;
+    config.clk_div = SPI_10MHz_DIV;
     config.event_cb = NULL;
     ESP_ERROR_CHECK(spi_init(HSPI_HOST, &config));
 }
@@ -337,7 +329,7 @@ static void transport_task(void *arg)
     master_phase_init();
     spi_init_master();
     master_cs_init();
-    ESP_LOGI(TAG, "MASTER clock=20MHz burst=%u ready=GPIO0 phase=GPIO3",
+    ESP_LOGI(TAG, "MASTER clock=10MHz burst=%u ready=GPIO0 phase=GPIO3",
              (unsigned)KSTREAM_V2_BURST_BYTES);
 
     kstream_v2_response_t status;
@@ -359,6 +351,7 @@ static void transport_task(void *arg)
 
     for (;;) {
         if (s_quiesce_requested) {
+            ready_wait_level(1u);
             s_quiesced = true;
             __sync_synchronize();
             for (;;)
@@ -370,8 +363,8 @@ static void transport_task(void *arg)
                             &status);
         worked |= moved != 0u;
 
-        /* Uplink gets three bursts for every downlink burst: video is the
-         * dominant stream, while commands still have a bounded service time. */
+        /* Service both bulk directions in bounded batches so console traffic
+         * is never held behind an unbounded stream drain. */
         for (unsigned i = 0; i < 3u; ++i) {
             moved = pull(KSTREAM_V2_STREAM_UPLINK, s_buffers->uplink,
                          status.uplink_used, &status);
