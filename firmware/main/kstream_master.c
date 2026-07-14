@@ -28,6 +28,9 @@ static volatile bool s_quiesced;
 static volatile uint32_t s_diag_stage;
 static volatile uint32_t s_diag_got_crc;
 static volatile uint32_t s_diag_calculated_crc;
+static volatile uint32_t s_diag_sequence;
+static volatile uint8_t s_diag_opcode;
+static volatile uint8_t s_diag_stream;
 static uint64_t s_diag_push_bytes;
 static uint64_t s_diag_pull_bytes;
 static uint32_t s_diag_response_words[KSTREAM_V2_FRAME_BYTES / 4u];
@@ -125,17 +128,23 @@ static void spi_transfer(bool read, void *buffer, size_t length)
     }
 }
 
-static void master_write_complete(void)
+static void master_write_begin(void)
 {
     master_phase_set(0u);
-    ready_wait_level(0u);
+    ready_wait_level(1u);
+}
+
+static void master_write_complete(void)
+{
     master_phase_set(1u);
+    ready_wait_level(0u);
 }
 
 static void master_read_begin(void)
 {
     s_diag_stage = 3u;
     if (s_sequence == 1u) ESP_LOGI(TAG, "HS DMA_WAIT");
+    master_phase_set(0u);
     ready_wait_level(1u);
     s_diag_stage = 5u;
     if (s_sequence == 1u) ESP_LOGI(TAG, "HS DMA_READY");
@@ -145,11 +154,10 @@ static void master_read_complete(void)
 {
     s_diag_stage = 7u;
     if (s_sequence == 1u) ESP_LOGI(TAG, "HS COMPLETE_REQUEST");
-    master_phase_set(0u);
+    master_phase_set(1u);
     ready_wait_level(0u);
     s_diag_stage = 8u;
     if (s_sequence == 1u) ESP_LOGI(TAG, "HS COMPLETE_GRANTED");
-    master_phase_set(1u);
 }
 
 static void command_send(kstream_v2_command_t *command)
@@ -158,7 +166,10 @@ static void command_send(kstream_v2_command_t *command)
     command->version = KSTREAM_V2_VERSION;
     command->sequence = ++s_sequence;
     kstream_v2_command_finalize(command);
-    ready_wait_level(1u);
+    s_diag_sequence = command->sequence;
+    s_diag_opcode = command->opcode;
+    s_diag_stream = command->stream;
+    master_write_begin();
     spi_transfer(false, command, sizeof(*command));
     master_write_complete();
 }
@@ -174,14 +185,15 @@ static void activation_command_send(kstream_v2_command_t *command)
     command->arg1 = KSTREAM_V2_INT_BOOT_LEVEL_HIGH;
     command->sequence = ++s_sequence;
     kstream_v2_command_finalize(command);
+    s_diag_sequence = command->sequence;
+    s_diag_opcode = command->opcode;
+    s_diag_stream = command->stream;
 
     /* K210 has this first RX DMA armed while it holds ESP GPIO0 HIGH.  This
      * descriptor, not elapsed boot time, transfers IO15 to phase signalling. */
     spi_transfer(false, command, sizeof(*command));
     s_diag_stage = 101u;
-    master_write_complete();
-    s_diag_stage = 102u;
-    ready_wait_level(1u);
+    ready_wait_level(0u);
     s_diag_stage = 103u;
     ESP_LOGI(TAG, "HS RESPONSE_ARMED");
 }
@@ -261,7 +273,7 @@ static size_t push(uint8_t stream, StreamBufferHandle_t source, uint32_t credit,
     command.length = (uint32_t)count;
     command.arg0 = (uint32_t)wire_count;
     command_send(&command);
-    ready_wait_level(1u);
+    master_write_begin();
     spi_transfer(false, s_burst, wire_count);
     master_write_complete();
     if (!response_read(command.sequence, status))
@@ -340,7 +352,7 @@ static void transport_task(void *arg)
         ESP_LOGE(TAG, "K210 slave did not activate INT; transport halted");
         vTaskDelete(NULL);
     }
-    ESP_LOGI(TAG, "INT_ACTIVE mode=toggle event=phase-armed");
+    ESP_LOGI(TAG, "INT_ACTIVE mode=level event=dma-ready");
 
     if (!query(KSTREAM_V2_OP_HELLO, &status)) {
         ESP_LOGE(TAG, "K210 slave did not answer HELLO; transport halted");
@@ -351,7 +363,7 @@ static void transport_task(void *arg)
 
     for (;;) {
         if (s_quiesce_requested) {
-            ready_wait_level(1u);
+            master_write_begin();
             s_quiesced = true;
             __sync_synchronize();
             for (;;)
@@ -419,10 +431,14 @@ size_t kstream_master_diag(char *buffer, size_t size)
 {
     int length = snprintf(
         buffer, size,
-        "SPI stage=%lu faults=%lu push=%lu pull=%lu crc=%08lx/%08lx words="
+        "SPI stage=%lu op=%u stream=%u seq=%lu ready=%d phase=%d faults=%lu push=%lu pull=%lu crc=%08lx/%08lx words="
         "%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,"
         "%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,%08lx\r\n",
-        (unsigned long)s_diag_stage, (unsigned long)s_faults,
+        (unsigned long)s_diag_stage, (unsigned)s_diag_opcode,
+        (unsigned)s_diag_stream, (unsigned long)s_diag_sequence,
+        gpio_get_level(KSTREAM_READY_GPIO),
+        gpio_get_level(KSTREAM_MASTER_PHASE_GPIO),
+        (unsigned long)s_faults,
         (unsigned long)s_diag_push_bytes,
         (unsigned long)s_diag_pull_bytes,
         (unsigned long)s_diag_got_crc,
