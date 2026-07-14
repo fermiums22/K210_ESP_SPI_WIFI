@@ -277,19 +277,23 @@ static size_t pull(uint8_t stream, StreamBufferHandle_t destination,
         count = space;
     if (count > sizeof(s_burst))
         count = sizeof(s_burst);
-    count &= ~(size_t)3u;
+    if (stream != KSTREAM_V2_STREAM_CONSOLE_TX)
+        count &= ~(size_t)3u;
     if (count == 0u)
         return 0u;
+    size_t wire_count = (count + 3u) & ~(size_t)3u;
+    if (wire_count < KSTREAM_V2_FRAME_BYTES)
+        wire_count = KSTREAM_V2_FRAME_BYTES;
 
     kstream_v2_command_t command;
     memset(&command, 0, sizeof(command));
     command.opcode = KSTREAM_V2_OP_PULL;
     command.stream = stream;
     command.length = (uint32_t)count;
-    command.arg0 = (uint32_t)count;
+    command.arg0 = (uint32_t)wire_count;
     command_send(&command);
     master_read_begin();
-    spi_transfer(true, s_burst, count);
+    spi_transfer(true, s_burst, wire_count);
     master_read_complete();
     ready_wait_next();
     if (!response_read(command.sequence, status))

@@ -20,14 +20,13 @@ class Console:
     def wait_for(self, expected, timeout=5.0):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            newline = self.buffer.find(b"\n")
-            if newline >= 0:
-                line = self.buffer[:newline + 1]
-                del self.buffer[:newline + 1]
-                text = line.decode("ascii", "replace").strip()
-                if expected in text:
-                    return text
-                continue
+            text = self.buffer.decode("ascii", "replace")
+            match = re.search(expected, text)
+            if match:
+                line_start = text.rfind("\n", 0, match.start()) + 1
+                result = text[line_start:match.end()].strip()
+                del self.buffer[:match.end()]
+                return result
             try:
                 data = self.sock.recv(4096)
             except socket.timeout:
@@ -35,7 +34,8 @@ class Console:
             if not data:
                 break
             self.buffer.extend(data)
-        raise RuntimeError(f"console response timeout: {expected}")
+        tail = self.buffer[-256:].decode("ascii", "replace")
+        raise RuntimeError(f"console response timeout: {expected}; got {tail!r}")
 
     def command(self, command, expected):
         self.sock.sendall((command + "\n").encode())
@@ -59,8 +59,9 @@ def main():
     console_sock = socket.create_connection((args.host, 21012), 5)
     console_sock.settimeout(0.2)
     console = Console(console_sock)
-    console.wait_for("SPI stage=")
-    baseline_status = console.command("status", "status down=")
+    console.wait_for(r"SPI stage=\d+")
+    status_pattern = r"status down=.*?\bderr=\d+"
+    baseline_status = console.command("status", status_pattern)
     baseline_rx = int(re.search(r"\brx=(\d+)", baseline_status).group(1))
     print(console.command("bench on", "uplink benchmark enabled"))
     print(console.command("bench down reset", "downlink benchmark enabled"))
@@ -93,11 +94,12 @@ def main():
     drain_deadline = time.monotonic() + 5.0
     delivered = 0
     while delivered < sent and time.monotonic() < drain_deadline:
-        status = console.command("status", "status down=")
+        status = console.command("status", status_pattern)
         delivered = int(re.search(r"\brx=(\d+)", status).group(1)) - baseline_rx
 
-    down_status = console.command("bench down off",
-                                  "downlink benchmark disabled")
+    down_status = console.command(
+        "bench down off",
+        r"downlink benchmark disabled bytes=\d+ errors=\d+")
     print(console.command("bench off", "uplink benchmark disabled"))
     console_sock.close()
     downlink.close()
