@@ -15,7 +15,7 @@
 #include "kstream_v2.h"
 
 #define KSTREAM_READY_GPIO GPIO_NUM_0
-#define KSTREAM_MASTER_PHASE_GPIO GPIO_NUM_3
+#define KSTREAM_MASTER_PHASE_GPIO GPIO_NUM_1
 #define KSTREAM_CS_GPIO GPIO_NUM_15
 
 static const char *TAG = "kstream-spi";
@@ -38,7 +38,7 @@ static uint8_t s_burst[KSTREAM_V2_BURST_BYTES] __attribute__((aligned(4)));
 
 static void master_phase_init(void)
 {
-    PIN_FUNC_SELECT(PERIPHS_IO_MUX_U0RXD_U, FUNC_GPIO3);
+    PIN_FUNC_SELECT(PERIPHS_IO_MUX_U0TXD_U, FUNC_GPIO1);
     ESP_ERROR_CHECK(gpio_set_level(KSTREAM_MASTER_PHASE_GPIO, 1u));
     ESP_ERROR_CHECK(gpio_set_direction(KSTREAM_MASTER_PHASE_GPIO,
                                        GPIO_MODE_OUTPUT));
@@ -309,6 +309,14 @@ static size_t pull(uint8_t stream, StreamBufferHandle_t destination,
     master_read_begin();
     spi_transfer(true, s_burst, wire_count);
     master_read_complete();
+    if (stream == KSTREAM_V2_STREAM_UPDATE_TX) {
+        if (xStreamBufferSend(destination, s_burst, count, 0) != count)
+            abort();
+        s_diag_pull_bytes += count;
+        if (!query(KSTREAM_V2_OP_STATUS, status))
+            return 0u;
+        return count;
+    }
     if (!response_read(command.sequence, status)) {
         return 0u;
     }
@@ -341,7 +349,7 @@ static void transport_task(void *arg)
     master_phase_init();
     spi_init_master();
     master_cs_init();
-    ESP_LOGI(TAG, "MASTER clock=10MHz burst=%u ready=GPIO0 phase=GPIO3",
+    ESP_LOGI(TAG, "MASTER clock=10MHz burst=%u ready=GPIO0 phase=GPIO1",
              (unsigned)KSTREAM_V2_BURST_BYTES);
 
     kstream_v2_response_t status;
@@ -370,7 +378,14 @@ static void transport_task(void *arg)
                 (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         }
         bool worked = false;
-        size_t moved = pull(KSTREAM_V2_STREAM_CONSOLE_TX,
+        size_t moved = pull(KSTREAM_V2_STREAM_UPDATE_TX,
+                            s_buffers->update_tx, status.update_tx_used,
+                            &status);
+        worked |= moved != 0u;
+        moved = push(KSTREAM_V2_STREAM_UPDATE_RX, s_buffers->update_rx,
+                     status.update_rx_free, &status);
+        worked |= moved != 0u;
+        moved = pull(KSTREAM_V2_STREAM_CONSOLE_TX,
                             s_buffers->console_tx, status.console_tx_used,
                             &status);
         worked |= moved != 0u;
@@ -405,6 +420,8 @@ static void transport_task(void *arg)
                 vTaskDelete(NULL);
             }
             vTaskDelay(1);
+        } else {
+            taskYIELD();
         }
     }
 }

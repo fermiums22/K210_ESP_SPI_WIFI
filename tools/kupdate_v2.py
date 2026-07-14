@@ -31,7 +31,7 @@ def recv_status(sock: socket.socket) -> tuple[int, int, int, int, int, int]:
     raw = recv_exact(sock, STATUS.size)
     magic, state, error, slot, _reserved, offset, image_size, detail, crc = STATUS.unpack(raw)
     if magic != MAGIC or zlib.crc32(raw[:-4]) & 0xFFFFFFFF != crc:
-        raise RuntimeError("invalid K210 status magic/CRC")
+        raise RuntimeError(f"invalid K210 status magic/CRC raw={raw.hex()}")
     name = STATE.get(state, f"STATE-{state}")
     print(f"K210 {name} slot={'AB'[slot] if slot < 2 else '?'} offset={offset}/{image_size} detail={detail}")
     if state == 255 or error:

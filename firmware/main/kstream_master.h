@@ -12,6 +12,8 @@ typedef struct kstream_master_buffers {
     StreamBufferHandle_t uplink;
     StreamBufferHandle_t console_rx;
     StreamBufferHandle_t console_tx;
+    StreamBufferHandle_t update_rx;
+    StreamBufferHandle_t update_tx;
 } kstream_master_buffers_t;
 
 void kstream_master_start(kstream_master_buffers_t *buffers);

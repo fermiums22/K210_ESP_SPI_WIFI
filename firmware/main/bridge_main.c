@@ -29,6 +29,8 @@
 #define UPLINK_RING_BYTES   8192u
 #define CONSOLE_RX_BYTES    2048u
 #define CONSOLE_TX_BYTES    4096u
+#define UPDATE_RX_BYTES     1024u
+#define UPDATE_TX_BYTES     128u
 #define ESP_OTA_PORT        21001u
 #define ESP_OTA_MAGIC       0x41544f45u
 #define ESP_OTA_FLAG_DUAL   0x00000001u
@@ -60,6 +62,11 @@ static volatile uint16_t s_uplink_peer_port;
 static volatile int s_console_send_errno;
 static volatile uint32_t s_console_send_count;
 static volatile int s_console_recv_errno;
+static volatile int s_update_close_reason;
+static volatile int s_update_close_errno;
+static volatile uint32_t s_update_recv_bytes;
+static uint8_t s_update_input[512];
+static uint8_t s_update_output[128];
 static volatile bool s_ota_active;
 static volatile int s_uplink_send_errno;
 static volatile uint32_t s_uplink_send_drops;
@@ -386,14 +393,16 @@ static void console_client(int fd)
     (void)send_all(fd, banner, sizeof(banner) - 1u);
     char diagnostic[384];
     int reset_length = snprintf(diagnostic, sizeof(diagnostic),
-                                "ESP reset=%d free_heap=%lu console_err=%d/%lu recv_err=%d udp_drop=%lu/%d\r\n",
+                                "ESP reset=%d free_heap=%lu console_err=%d/%lu recv_err=%d udp_drop=%lu/%d update_close=%d/%d bytes=%lu\r\n",
                                 (int)esp_reset_reason(),
                                 (unsigned long)esp_get_free_heap_size(),
                                 s_console_send_errno,
                                 (unsigned long)s_console_send_count,
                                 s_console_recv_errno,
                                 (unsigned long)s_uplink_send_drops,
-                                s_uplink_send_errno);
+                                s_uplink_send_errno,
+                                s_update_close_reason, s_update_close_errno,
+                                (unsigned long)s_update_recv_bytes);
     if (reset_length > 0)
         (void)send_all(fd, diagnostic, (size_t)reset_length);
     size_t diagnostic_length =
@@ -500,6 +509,73 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     }
 }
 
+static void update_client(int fd)
+{
+    for (;;) {
+        size_t output_count = xStreamBufferReceive(
+            s_streams.update_tx, s_update_output, sizeof(s_update_output), 0u);
+        if (output_count != 0u &&
+            send_all(fd, s_update_output, output_count) != 0) {
+            s_update_close_reason = 1;
+            s_update_close_errno = errno;
+            break;
+        }
+
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(fd, &readable);
+        struct timeval poll = {0, 10000};
+        int selected = select(fd + 1, &readable, NULL, NULL, &poll);
+        if (selected < 0 && errno == EINTR)
+            continue;
+        if (selected < 0) {
+            s_update_close_reason = 2;
+            s_update_close_errno = errno;
+            break;
+        }
+        if (selected == 0)
+            continue;
+        int count = recv(fd, s_update_input, sizeof(s_update_input), 0);
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            continue;
+        if (count <= 0) {
+            s_update_close_reason = count == 0 ? 3 : 4;
+            s_update_close_errno = count < 0 ? errno : 0;
+            break;
+        }
+        s_update_recv_bytes += (uint32_t)count;
+        if (xStreamBufferSend(s_streams.update_rx, s_update_input, (size_t)count,
+                              portMAX_DELAY) != (size_t)count) {
+            s_update_close_reason = 5;
+            abort();
+        }
+    }
+    shutdown(fd, SHUT_RDWR);
+}
+
+static void update_server_task(void *arg)
+{
+    (void)arg;
+    int listener = listener_open(KSTREAM_V2_PORT_UPDATE);
+    if (listener < 0) {
+        ESP_LOGE(TAG, "K210 update listen failed errno=%d", errno);
+        vTaskDelete(NULL);
+    }
+    ESP_LOGI(TAG, "K210_UPDATE_LISTEN port=%u", KSTREAM_V2_PORT_UPDATE);
+    for (;;) {
+        int fd = accept(listener, NULL, NULL);
+        if (fd < 0)
+            continue;
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0)
+            (void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+        update_client(fd);
+        close(fd);
+    }
+}
+
 static void wifi_start_sta(void)
 {
     tcpip_adapter_init();
@@ -539,14 +615,18 @@ void app_main(void)
     s_streams.uplink = xStreamBufferCreate(UPLINK_RING_BYTES, 1u);
     s_streams.console_rx = xStreamBufferCreate(CONSOLE_RX_BYTES, 1u);
     s_streams.console_tx = xStreamBufferCreate(CONSOLE_TX_BYTES, 1u);
+    s_streams.update_rx = xStreamBufferCreate(UPDATE_RX_BYTES, 1u);
+    s_streams.update_tx = xStreamBufferCreate(UPDATE_TX_BYTES, 1u);
     if (!s_streams.downlink || !s_streams.uplink ||
-        !s_streams.console_rx || !s_streams.console_tx)
+        !s_streams.console_rx || !s_streams.console_tx ||
+        !s_streams.update_rx || !s_streams.update_tx)
         abort();
 
     wifi_start_sta();
     xTaskCreate(audio_server_task, "audio_tcp", 3072, NULL, 8, NULL);
     xTaskCreate(mic_server_task, "mic_tcp", 3072, NULL, 8, NULL);
     xTaskCreate(console_server_task, "console_tcp", 3072, NULL, 8, NULL);
+    xTaskCreate(update_server_task, "k210_ota", 1536, NULL, 9, NULL);
     if (xTaskCreate(ota_server_task, "esp_ota", 3072, NULL, 11, NULL) != pdPASS)
         abort();
 }
