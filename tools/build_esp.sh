@@ -17,6 +17,7 @@ test -x "$TOOLCHAIN_BIN/xtensa-lx106-elf-gcc.exe"
 cd "$PROJECT"
 INPUT_HASH="$({
     find main -type f -print0 | sort -z | xargs -0 sha256sum
+    find "$REPO_DIR/protocol" -type f -print0 | sort -z | xargs -0 sha256sum
     sha256sum Makefile sdkconfig partitions_1mb_ota.csv 2>/dev/null || true
 } | sha256sum | cut -d' ' -f1)"
 STAMP="build/esp8285-sta-klink.inputs.sha256"

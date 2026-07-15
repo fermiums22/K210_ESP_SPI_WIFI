@@ -47,9 +47,9 @@ def main():
     parser.add_argument("host", nargs="?", default="192.168.0.105")
     parser.add_argument("--seconds", type=float, default=5.0)
     parser.add_argument("--uplink", type=int, default=1500000,
-                        help="required uplink rate in bit/s")
+                        help="required uplink rate in byte/s")
     parser.add_argument("--downlink", type=int, default=500000,
-                        help="downlink rate in bit/s")
+                        help="downlink rate in byte/s")
     args = parser.parse_args()
 
     uplink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -68,8 +68,12 @@ def main():
     status_pattern = r"status down=.*?\bderr=\d+"
     baseline_status = console.command("status", status_pattern)
     baseline_rx = int(re.search(r"\brx=(\d+)", baseline_status).group(1))
-    print(console.command("bench on", "uplink benchmark enabled"))
     print(console.command("bench down reset", "downlink benchmark enabled"))
+    if args.uplink:
+        print(console.command("bench on", "uplink benchmark enabled"))
+    console_sock.shutdown(socket.SHUT_RDWR)
+    console_sock.close()
+    time.sleep(0.1)
 
     packets = []
 
@@ -83,19 +87,29 @@ def main():
 
     receiver = threading.Thread(target=receive_uplink)
     receiver.start()
-    downlink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    downlink = socket.create_connection((args.host, 21010), 5)
+    downlink.settimeout(None)
+    downlink.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     started = time.perf_counter()
     sent = 0
     while time.perf_counter() - started < args.seconds:
-        payload = bytes(pattern(sent + i) for i in range(1200))
-        downlink.sendto(payload, (args.host, 21010))
+        payload = bytes(pattern(sent + i) for i in range(4800))
+        downlink.sendall(payload)
         sent += len(payload)
-        delay = started + sent * 8 / args.downlink - time.perf_counter()
+        delay = started + sent / args.downlink - time.perf_counter()
         if delay > 0:
             time.sleep(delay)
+    downlink.shutdown(socket.SHUT_WR)
+    downlink.close()
     receiver.join()
     elapsed = time.perf_counter() - started
-    print(console.command("bench off", "uplink benchmark disabled"))
+
+    console_sock = socket.create_connection((args.host, 21012), 5)
+    console_sock.settimeout(0.2)
+    console = Console(console_sock)
+    console.wait_for(r"SPI stage=\d+\b")
+    if args.uplink:
+        print(console.command("bench off", "uplink benchmark disabled"))
 
     drain_deadline = time.monotonic() + 5.0
     delivered = 0
@@ -109,7 +123,6 @@ def main():
     down_corrupt = int(re.search(r"\bderr=(\d+)", status).group(1))
     console_sock.sendall(b"bench down off\n")
     console_sock.close()
-    downlink.close()
     uplink.close()
 
     received = 0
@@ -139,23 +152,21 @@ def main():
                    f"skipped={down_skipped} errors={down_corrupt}")
     down_loss = max(0, sent - down_received)
 
-    source_rate = source * 8 / args.seconds
-    uplink_rate = received * 8 / args.seconds
-    downlink_rate = down_received * 8 / elapsed
+    source_rate = source / args.seconds
+    uplink_rate = received / args.seconds
+    downlink_rate = down_received / elapsed
     print(down_status)
-    print(f"uplink: target {args.uplink / 1e6:.3f} Mb/s, "
-          f"source {source_rate / 1e6:.3f} Mb/s, "
-          f"received {uplink_rate / 1e6:.3f} Mb/s, "
-          f"({uplink_rate / 8e6:.3f} MB/s), "
+    print(f"uplink: target {args.uplink / 1e6:.3f} MB/s, "
+          f"source {source_rate / 1e6:.3f} MB/s, "
+          f"received {uplink_rate / 1e6:.3f} MB/s, "
           f"gaps {gaps}, corrupt {corrupt}")
-    print(f"downlink: target {args.downlink / 1e6:.3f} Mb/s, "
-          f"sent {sent * 8 / elapsed / 1e6:.3f} Mb/s, "
-          f"delivered {downlink_rate / 1e6:.3f} Mb/s, "
-          f"({downlink_rate / 8e6:.3f} MB/s), "
+    print(f"downlink: target {args.downlink / 1e6:.3f} MB/s, "
+          f"sent {sent / elapsed / 1e6:.3f} MB/s, "
+          f"delivered {downlink_rate / 1e6:.3f} MB/s, "
           f"loss {down_loss * 100 / sent:.2f}%, "
           f"skipped {down_skipped}, corrupt {down_corrupt}")
 
-    passed = (uplink_rate >= args.uplink * 0.95 and
+    passed = ((not args.uplink or uplink_rate >= args.uplink * 0.95) and
               downlink_rate >= args.downlink * 0.95 and
               corrupt == 0 and down_corrupt == 0)
     print(f"RESULT: {'PASS' if passed else 'FAIL'}")

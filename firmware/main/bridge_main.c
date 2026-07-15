@@ -69,9 +69,14 @@ static volatile uint32_t s_update_recv_bytes;
 static volatile uint32_t s_update_session_counter;
 static uint8_t s_update_input[KSTREAM_V2_UPDATE_DATA_BYTES];
 static uint8_t s_update_output[128];
+static uint8_t s_downlink_input[1200];
 static volatile bool s_ota_active;
 static volatile int s_uplink_send_errno;
 static volatile uint32_t s_uplink_send_drops;
+static volatile uint32_t s_uplink_send_waits;
+static volatile uint32_t s_downlink_recv_bytes;
+static volatile int s_downlink_recv_errno;
+static volatile uint32_t s_downlink_stage;
 
 static int listener_open(uint16_t port)
 {
@@ -282,23 +287,41 @@ static int udp_bind(uint16_t port)
 static void audio_server_task(void *arg)
 {
     (void)arg;
-    int fd = udp_bind(KSTREAM_V2_PORT_DOWNLINK);
-    if (fd < 0) {
-        ESP_LOGE(TAG, "audio UDP bind failed errno=%d", errno);
+    int listener = listener_open(KSTREAM_V2_PORT_DOWNLINK);
+    if (listener < 0) {
+        ESP_LOGE(TAG, "downlink TCP listen failed errno=%d", errno);
         vTaskDelete(NULL);
     }
-    ESP_LOGI(TAG, "DOWNLINK_UDP port=%u", KSTREAM_V2_PORT_DOWNLINK);
-    uint8_t buffer[1200];
+    ESP_LOGI(TAG, "DOWNLINK_TCP port=%u", KSTREAM_V2_PORT_DOWNLINK);
     for (;;) {
-        int count = recv(fd, buffer, sizeof(buffer), 0);
-        if (count <= 0)
+        int client = accept(listener, NULL, NULL);
+        if (client < 0)
             continue;
-        if (s_ota_active)
-            continue;
-        if (xStreamBufferSpacesAvailable(s_streams.downlink) >= (size_t)count &&
-            xStreamBufferSend(s_streams.downlink, buffer, count, 0u) !=
-                (size_t)count)
-            abort();
+        ESP_LOGI(TAG, "DOWNLINK_CONNECTED");
+        for (;;) {
+            s_downlink_stage = 1u;
+            int count = recv(client, s_downlink_input,
+                             sizeof(s_downlink_input), 0);
+            s_downlink_stage = 2u;
+            if (count <= 0 || s_ota_active) {
+                s_downlink_recv_errno = count < 0 ? errno : 0;
+                break;
+            }
+            s_downlink_recv_bytes += (uint32_t)count;
+            size_t offset = 0u;
+            while (offset < (size_t)count) {
+                s_downlink_stage = 3u;
+                size_t sent = xStreamBufferSend(s_streams.downlink,
+                                                s_downlink_input + offset,
+                                                (size_t)count - offset,
+                                                portMAX_DELAY);
+                if (sent == 0u)
+                    abort();
+                offset += sent;
+            }
+            s_downlink_stage = 4u;
+        }
+        close(client);
     }
 }
 
@@ -338,10 +361,17 @@ static void uplink_udp_sender_task(void *arg)
         peer.sin_family = AF_INET;
         peer.sin_addr.s_addr = address;
         peer.sin_port = port;
-        if (sendto(s_uplink_udp_fd, packet, count + 8u, 0,
-                   (struct sockaddr *)&peer, sizeof(peer)) < 0) {
+        for (;;) {
+            if (sendto(s_uplink_udp_fd, packet, count + 8u, 0,
+                       (struct sockaddr *)&peer, sizeof(peer)) >= 0)
+                break;
             s_uplink_send_errno = errno;
-            ++s_uplink_send_drops;
+            if (errno != ENOMEM && errno != EAGAIN && errno != EWOULDBLOCK) {
+                ++s_uplink_send_drops;
+                break;
+            }
+            ++s_uplink_send_waits;
+            vTaskDelay(1u);
         }
     }
 }
@@ -395,17 +425,17 @@ static void console_client(int fd)
         "K210 console over WiFi/SPI. Type 'help'.\r\n";
     (void)send_all(fd, banner, sizeof(banner) - 1u);
     char diagnostic[384];
-    int reset_length = snprintf(diagnostic, sizeof(diagnostic),
-                                "ESP reset=%d free_heap=%lu console_err=%d/%lu recv_err=%d udp_drop=%lu/%d update_close=%d/%d bytes=%lu\r\n",
-                                (int)esp_reset_reason(),
-                                (unsigned long)esp_get_free_heap_size(),
-                                s_console_send_errno,
-                                (unsigned long)s_console_send_count,
-                                s_console_recv_errno,
-                                (unsigned long)s_uplink_send_drops,
-                                s_uplink_send_errno,
-                                s_update_close_reason, s_update_close_errno,
-                                (unsigned long)s_update_recv_bytes);
+    int reset_length = snprintf(
+        diagnostic, sizeof(diagnostic),
+        "ESP reset=%d free_heap=%lu console_err=%d/%lu recv_err=%d udp_drop=%lu/%d wait=%lu update_close=%d/%d bytes=%lu down_tcp=%lu/%d stage=%lu\r\n",
+        (int)esp_reset_reason(), (unsigned long)esp_get_free_heap_size(),
+        s_console_send_errno, (unsigned long)s_console_send_count,
+        s_console_recv_errno, (unsigned long)s_uplink_send_drops,
+        s_uplink_send_errno, (unsigned long)s_uplink_send_waits,
+        s_update_close_reason, s_update_close_errno,
+        (unsigned long)s_update_recv_bytes,
+        (unsigned long)s_downlink_recv_bytes, s_downlink_recv_errno,
+        (unsigned long)s_downlink_stage);
     if (reset_length > 0)
         (void)send_all(fd, diagnostic, (size_t)reset_length);
     size_t diagnostic_length =
@@ -692,12 +722,15 @@ void app_main(void)
         abort();
 
     wifi_start_sta();
-    xTaskCreate(audio_server_task, "audio_tcp", 3072, NULL,
-                KSTREAM_TASK_PRIORITY, NULL);
-    xTaskCreate(mic_server_task, "mic_tcp", 3072, NULL,
-                KSTREAM_TASK_PRIORITY, NULL);
-    xTaskCreate(console_server_task, "console_tcp", 3072, NULL,
-                KSTREAM_TASK_PRIORITY, NULL);
+    if (xTaskCreate(audio_server_task, "audio_tcp", 3072, NULL,
+                    KSTREAM_TASK_PRIORITY, NULL) != pdPASS)
+        abort();
+    if (xTaskCreate(mic_server_task, "mic_tcp", 3072, NULL,
+                    KSTREAM_TASK_PRIORITY, NULL) != pdPASS)
+        abort();
+    if (xTaskCreate(console_server_task, "console_tcp", 3072, NULL,
+                    KSTREAM_TASK_PRIORITY, NULL) != pdPASS)
+        abort();
     if (xTaskCreate(update_server_task, "k210_ota", 2048, NULL,
                     KSTREAM_TASK_PRIORITY, NULL) !=
         pdPASS)

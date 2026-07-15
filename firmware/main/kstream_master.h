@@ -7,7 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
 
-#define KSTREAM_TASK_PRIORITY 8u
+#define KSTREAM_TASK_PRIORITY 7u
 
 typedef struct kstream_master_buffers {
     StreamBufferHandle_t downlink;

@@ -10,7 +10,9 @@
 #include "esp_log.h"
 #include "esp8266/eagle_soc.h"
 #include "esp8266/pin_mux_register.h"
+#include "esp8266/spi_struct.h"
 #include "freertos/task.h"
+#include "rom/ets_sys.h"
 
 #include "kstream_v2.h"
 
@@ -92,33 +94,54 @@ static void spi_transfer(bool read, void *buffer, size_t length)
     uint8_t *start = bytes;
     size_t total = length;
     ESP_ERROR_CHECK(gpio_set_level(KSTREAM_CS_GPIO, 0u));
+    ets_delay_us(1u);
+    SPI1.user.usr_command = 0u;
+    SPI1.user.usr_addr = 0u;
+    SPI1.user.usr_dummy = 0u;
     while (length != 0u) {
         size_t count = length > 64u ? 64u : length;
-        spi_trans_t trans;
-        memset(&trans, 0, sizeof(trans));
+        while (SPI1.cmd.usr)
+            ;
         if (read) {
-            trans.miso = (uint32_t *)bytes;
-            trans.bits.miso = count * 8u;
+            SPI1.user.usr_mosi = 0u;
+            SPI1.user.usr_miso = 1u;
+            SPI1.user1.usr_miso_bitlen = count * 8u - 1u;
+            SPI1.cmd.usr = 1u;
+            while (SPI1.cmd.usr)
+                ;
+            memcpy(bytes, (const void *)SPI1.data_buf, count);
         } else {
-            trans.mosi = (uint32_t *)bytes;
-            trans.bits.mosi = count * 8u;
+            SPI1.user.usr_miso = 0u;
+            SPI1.user.usr_mosi = 1u;
+            SPI1.user1.usr_mosi_bitlen = count * 8u - 1u;
+            memcpy((void *)SPI1.data_buf, bytes, count);
+            SPI1.cmd.usr = 1u;
         }
-        ESP_ERROR_CHECK(spi_trans(HSPI_HOST, &trans));
         bytes += count;
         length -= count;
     }
 
     uint32_t guard[2] = {UINT32_MAX, UINT32_MAX};
-    spi_trans_t trans;
-    memset(&trans, 0, sizeof(trans));
+    while (SPI1.cmd.usr)
+        ;
     if (read) {
-        trans.miso = guard;
-        trans.bits.miso = 32u;
+        SPI1.user.usr_mosi = 0u;
+        SPI1.user.usr_miso = 1u;
+        SPI1.user1.usr_miso_bitlen = 31u;
+        SPI1.cmd.usr = 1u;
+        while (SPI1.cmd.usr)
+            ;
+        guard[0] = SPI1.data_buf[0];
     } else {
-        trans.mosi = guard;
-        trans.bits.mosi = 64u;
+        SPI1.user.usr_miso = 0u;
+        SPI1.user.usr_mosi = 1u;
+        SPI1.user1.usr_mosi_bitlen = 63u;
+        SPI1.data_buf[0] = guard[0];
+        SPI1.data_buf[1] = guard[1];
+        SPI1.cmd.usr = 1u;
     }
-    ESP_ERROR_CHECK(spi_trans(HSPI_HOST, &trans));
+    while (SPI1.cmd.usr)
+        ;
     ESP_ERROR_CHECK(gpio_set_level(KSTREAM_CS_GPIO, 1u));
     if (read) {
         memmove(start, start + sizeof(uint32_t), total - sizeof(uint32_t));
@@ -334,7 +357,7 @@ static void spi_init_master(void)
     config.interface.cs_en = 0u;
     config.intr_enable.val = SPI_MASTER_DEFAULT_INTR_ENABLE;
     config.mode = SPI_MASTER_MODE;
-    config.clk_div = SPI_10MHz_DIV;
+    config.clk_div = SPI_40MHz_DIV;
     config.event_cb = NULL;
     ESP_ERROR_CHECK(spi_init(HSPI_HOST, &config));
 }
@@ -347,7 +370,7 @@ static void transport_task(void *arg)
     master_phase_init();
     spi_init_master();
     master_cs_init();
-    ESP_LOGI(TAG, "MASTER clock=10MHz burst=%u ready=GPIO0 phase=GPIO3",
+    ESP_LOGI(TAG, "MASTER clock=40MHz burst=%u ready=GPIO0 phase=GPIO3",
              (unsigned)KSTREAM_V2_BURST_BYTES);
 
     kstream_v2_response_t status;
@@ -385,7 +408,7 @@ static void transport_task(void *arg)
 
         /* Service both bulk directions in bounded batches so console traffic
          * is never held behind an unbounded stream drain. */
-        for (unsigned i = 0; i < 3u; ++i) {
+        for (unsigned i = 0; i < 1u; ++i) {
             size_t wanted = status.uplink_used;
             if (wanted > KSTREAM_V2_BURST_BYTES)
                 wanted = KSTREAM_V2_BURST_BYTES;
@@ -403,7 +426,7 @@ static void transport_task(void *arg)
         moved = push(KSTREAM_V2_STREAM_CONSOLE_RX, s_buffers->console_rx,
                      status.console_rx_free, &status);
         worked |= moved != 0u;
-        for (unsigned i = 0; i < 3u; ++i) {
+        for (unsigned i = 0; i < 1u; ++i) {
             moved = push(KSTREAM_V2_STREAM_DOWNLINK, s_buffers->downlink,
                          status.downlink_free, &status);
             worked |= moved != 0u;
@@ -420,9 +443,9 @@ static void transport_task(void *arg)
                 s_transport_task = NULL;
                 vTaskDelete(NULL);
             }
-            vTaskDelay(1);
+            vTaskDelay(10);
         } else {
-            taskYIELD();
+            vTaskDelay(1u);
         }
     }
 }
