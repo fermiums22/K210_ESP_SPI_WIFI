@@ -2,6 +2,13 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
+set "ESP_CLEAN_BUILD=0"
+set "ESP_RECONFIGURE=0"
+if /i "%~1"=="--full" (
+  set "ESP_CLEAN_BUILD=1"
+  set "ESP_RECONFIGURE=1"
+)
+
 set "SDK_ROOT=%ESP_SDK_ROOT%"
 if "%SDK_ROOT%"=="" if exist "D:\w_space\esp8266_sdk\ESP8266_RTOS_SDK\make\project.mk" set "SDK_ROOT=D:\w_space\esp8266_sdk"
 if "%SDK_ROOT%"=="" if exist "C:\ESP8266\sdk\ESP8266_RTOS_SDK\make\project.mk" set "SDK_ROOT=C:\ESP8266\sdk"
@@ -25,5 +32,5 @@ if not exist "%BASH%" (
 set "PROJECT=%CD%\firmware"
 set "HELPER=%CD%\tools\build_esp.sh"
 
-"%BASH%" -lc "export MSYSTEM=MINGW32; source /etc/profile; export IDF_PATH=\"$(cygpath -u '%SDK_DIR%')\"; export ESP_SDK_ROOT=\"$(cygpath -u '%SDK_ROOT%')\"; export ESP_PROJECT=\"$(cygpath -u '%PROJECT%')\"; bash \"$(cygpath -u '%HELPER%')\""
+"%BASH%" -lc "export MSYSTEM=MINGW32; source /etc/profile; export IDF_PATH=\"$(cygpath -u '%SDK_DIR%')\"; export ESP_SDK_ROOT=\"$(cygpath -u '%SDK_ROOT%')\"; export ESP_PROJECT=\"$(cygpath -u '%PROJECT%')\"; export ESP_CLEAN_BUILD='%ESP_CLEAN_BUILD%'; export ESP_RECONFIGURE='%ESP_RECONFIGURE%'; bash \"$(cygpath -u '%HELPER%')\""
 exit /b %ERRORLEVEL%

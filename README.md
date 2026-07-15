@@ -32,9 +32,8 @@ build_esp.bat
 
 ```text
 firmware\build\bootloader\bootloader.bin
-firmware\build\partitions_1mb_ota.bin
-firmware\build\ota_data_initial.bin
-firmware\build\esp8285-sta-klink.ota.bin
+firmware\build\partitions_1mb_singleapp.bin
+firmware\build\esp8285-sta-klink.bin
 ```
 
 ## Структура

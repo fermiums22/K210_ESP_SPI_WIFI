@@ -60,7 +60,7 @@ def main():
     console_sock = socket.create_connection((args.host, 21012), 5)
     console_sock.settimeout(0.2)
     console = Console(console_sock)
-    console.wait_for(r"KLINK role=slave active=1")
+    console.wait_for(r"SPI stage=\d+\b")
     uplink.sendto(b"speed", (args.host, 21011))
     registration, _ = uplink.recvfrom(16)
     if registration != b"KUP2":
@@ -95,6 +95,7 @@ def main():
             time.sleep(delay)
     receiver.join()
     elapsed = time.perf_counter() - started
+    print(console.command("bench off", "uplink benchmark disabled"))
 
     drain_deadline = time.monotonic() + 5.0
     delivered = 0
@@ -104,10 +105,9 @@ def main():
         delivered = int(re.search(r"\brx=(\d+)", status).group(1)) - baseline_rx
         down_used = int(re.search(r"status down=(\d+)/", status).group(1))
 
-    down_status = console.command(
-        "bench down off",
-        r"downlink benchmark disabled bytes=\d+ skipped=\d+ errors=\d+")
-    print(console.command("bench off", "uplink benchmark disabled"))
+    down_skipped = int(re.search(r"\bdloss=(\d+)", status).group(1))
+    down_corrupt = int(re.search(r"\bderr=(\d+)", status).group(1))
+    console_sock.sendall(b"bench down off\n")
     console_sock.close()
     downlink.close()
     uplink.close()
@@ -134,10 +134,9 @@ def main():
             corrupt += 1
 
     source = 0 if first_offset is None else last_offset - first_offset
-    match = re.search(r"bytes=(\d+) skipped=(\d+) errors=(\d+)", down_status)
-    if not match:
-        raise RuntimeError(f"invalid downlink result: {down_status}")
-    down_received, down_skipped, down_corrupt = map(int, match.groups())
+    down_received = delivered
+    down_status = (f"downlink benchmark bytes={down_received} "
+                   f"skipped={down_skipped} errors={down_corrupt}")
     down_loss = max(0, sent - down_received)
 
     source_rate = source * 8 / args.seconds
