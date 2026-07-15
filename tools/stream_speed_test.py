@@ -146,10 +146,12 @@ def main():
     print(f"uplink: target {args.uplink / 1e6:.3f} Mb/s, "
           f"source {source_rate / 1e6:.3f} Mb/s, "
           f"received {uplink_rate / 1e6:.3f} Mb/s, "
+          f"({uplink_rate / 8e6:.3f} MB/s), "
           f"gaps {gaps}, corrupt {corrupt}")
     print(f"downlink: target {args.downlink / 1e6:.3f} Mb/s, "
           f"sent {sent * 8 / elapsed / 1e6:.3f} Mb/s, "
           f"delivered {downlink_rate / 1e6:.3f} Mb/s, "
+          f"({downlink_rate / 8e6:.3f} MB/s), "
           f"loss {down_loss * 100 / sent:.2f}%, "
           f"skipped {down_skipped}, corrupt {down_corrupt}")
 
